@@ -41,6 +41,8 @@ type AgentMessage struct {
 	InterpretMessage string        `json:"interpret_message,omitempty"`
 	Summary          string        `json:"summary,omitempty"`
 	Nutshell         string        `json:"nutshell,omitempty"`
+	Reason           string        `json:"reason,omitempty"`      // unsafe reason
+	Explanation      string        `json:"explanation,omitempty"` // unsafe details
 }
 
 // AgentAction models a single step in a recipe or fallback.
@@ -257,7 +259,14 @@ func handleAgentMessage(msg AgentMessage, sm *SessionManager) (bool, error) {
 			fmt.Printf("%s %s\n", magenta("[AGENT]"), msg.Message)
 		}
 	case "error":
-		fmt.Printf("%s %s\n", red("[ERROR]"), msg.Message)
+		fmt.Printf("%s %s", red("[ERROR]"), msg.Message)
+		return false, nil
+	case "unsafe":
+		fmt.Printf("%s %s", red("[UNSAFE]"), msg.Reason)
+		if exp := strings.TrimSpace(msg.Explanation); exp != "" {
+			fmt.Println(yellow("Explanation:"))
+			fmt.Println(exp)
+		}
 		return false, nil
 	case "plan":
 		fmt.Printf("\n%s\n%s %s\n\n%s\n", yellow("🧠 Plan:"), blue("Request:"), msg.Request, blue("Steps:"))

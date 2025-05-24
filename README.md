@@ -1,12 +1,12 @@
-# OG
+# OG v.0.1.1-dev
 <small>the original gangster</small>
 
 **OG** is a command-line AI agent that pairs a fast Go CLI with a Python-based [smolagents](https://github.com/huggingface/smolagents), letting you collaborate with an LLM to:
 
-* Understand source files and repo history
 * Get help with shell commands
-* Review diffs and plan safe actions
 * Walk through multi-step "recipes" with approval gating
+* Understand source files and repo history
+* Review git diffs and plan safe actions
 
 
 ## 🔍 Example Uses
@@ -15,7 +15,7 @@
 
 ```bash
 og "what does the script bin/git-rewind do?"
-```
+````
 
 > OG reads and summarizes the script, explaining its behavior in plain language.
 
@@ -57,7 +57,6 @@ og "remove all .DS_Store files, then zip each top-level folder in this directory
 
 ### 🔐 Safety-First CLI Automation
 
-
 ```bash
 og "change the password for macdev"
 ```
@@ -75,7 +74,6 @@ og "delete all branches except main and staging"
 * Confirms which branches would be deleted
 * Asks you to approve each destructive action
 * Explains the result and any errors
-
 
 ## ⚙️ Features
 
@@ -97,6 +95,7 @@ make build         # builds ./build/og
 uv venv            # sets up Python venv
 source .venv/bin/activate
 uv pip install -e .  # installs agent CLI
+# `h5py` is already included via pyproject.toml and enables HDF5-based session snapshotting
 ```
 
 ### 2. Create and configure `og_config.json`
@@ -124,18 +123,17 @@ Then edit:
 og "show me the diff for bin/script.py at the sixth commit"
 ```
 
-
 ## 📂 Config Reference (`~/.local/share/og_config.json`)
 
-| Key                    | Description                                                 |
-| ---------------------- | ----------------------------------------------------------- |
-| `python_agent_path`    | Path to the Python agent binary (usually `.venv/bin/agent`) |
-| `ollama_model`         | LLM model name (e.g. `llama3`)                              |
-| `ollama_host`          | Base URL for Ollama's API                                   |
-| `summary_mode`         | Whether to show final summaries                             |
-| `verbose_agent`        | Enables detailed logs from the agent                        |
-| `default_history_path` | Reserved for future features                                |
-
+| Key                    | Description                                                              |
+| ---------------------- | ------------------------------------------------------------------------ |
+| `python_agent_path`    | Path to the Python agent binary (usually `.venv/bin/agent`)              |
+| `ollama_model`         | LLM model name (e.g. `llama3`)                                           |
+| `ollama_host`          | Base URL for Ollama's API                                                |
+| `summary_mode`         | Whether to show final summaries                                          |
+| `verbose_agent`        | Enables detailed logs from the agent                                     |
+| `default_history_path` | Reserved for future features                                             |
+| *(none)*               | No extra keys needed — HDF5 snapshots auto-enable if `h5py` is available |
 
 ## 🛠 Development Tips
 
@@ -143,7 +141,6 @@ og "show me the diff for bin/script.py at the sixth commit"
 * Use `agent --help` to test the Python agent independently
 * NDJSON is used between Go and Python for structured IPC
 
-
 ## License
 
-Licensed under the LPGL (see the [LICENSE](LICENSE) file) for a freer tomorrow.
+Licensed under the LGPL (see the [LICENSE](LICENSE) file) for a freer tomorrow.

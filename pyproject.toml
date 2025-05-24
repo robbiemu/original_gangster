@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
   "rich~=14.0",
   "litellm~=1.71",
-  "smolagents~=1.16"
+  "smolagents~=1.16",
+  "h5py~=3.13"
 ]
 
 [project.scripts]
