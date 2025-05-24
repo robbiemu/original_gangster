@@ -1,0 +1,20 @@
+[project]
+name = "original-gangster"
+version = "0.1.0"
+description = "A command-line AI companion for terminal work, combining a Go CLI with a Python-based smolagent."
+authors = [
+  { name = "robbiemu", email = "roberto.tomas.cuentas@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "rich~=14.0",
+  "litellm~=1.71",
+  "smolagents~=1.16"
+]
+
+[project.scripts]
+agent = "agent:main"
+
+[tool.setuptools.packages.find]
+include = ["agent"]
