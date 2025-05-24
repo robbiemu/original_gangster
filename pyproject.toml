@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-agent = "agent:main"
+agent = "agent.agent:main"
 
 [tool.setuptools.packages.find]
 include = ["agent"]

@@ -1,313 +1,354 @@
+#!/usr/bin/env python3
+"""
+OG Agent (v5) – Full multi-agent orchestration with request- and action-level audits.
+Features:
+- Single instantiation of auditor model
+- Pre-plan generation and storage of recipe
+- Request-level and per-action safety audits
+- Recipe capture for audit explanations
+- Session caching, interactive ProxyTool approvals, NDJSON IPC
+"""
 import sys
 import json
+import asyncio
 import argparse
-from rich.console import Console
-from rich.syntax import Syntax
-from rich.markdown import Markdown
-from smolagents.tool_code_agent import CodeAgent
-from smolagents.llm.litellm import LiteLLMModel # Using LiteLLMModel for Ollama
+from pathlib import Path
+from typing import List, Dict, Optional
+from smolagents import CodeAgent, LiteLLMModel, ManagedAgent
+from smolagents.tools import ShellTool, FileReadTool, PythonInterpreterTool, Tool
 
 
-console = Console()
-
-# --- Helper Functions for Communication ---
-
-def send_message(message_type: str, data: dict):
-    """Sends a JSON message to stdout for the Go wrapper to consume."""
-    message = {"type": message_type, **data}
-    json_message = json.dumps(message)
-    console.print(json_message, highlight=False, style="black on black") # Print raw JSON to stdout
-    sys.stdout.flush() # Ensure it's sent immediately
+def emit(msg_type: str, data: dict):
+    # --- NDJSON emitter for IPC ---
+    payload = {"type": msg_type, **data}
+    print(json.dumps(payload), flush=True)
 
 
-def read_response():
-    """Reads a JSON response from stdin (from the Go wrapper)."""
+# --- Session management and recipe storage ---
+class AgentSession:
+    """Manages session memory and stores current recipe."""
+    def __init__(self, session_hash: str):
+        self.session_hash = session_hash
+        self.storage_dir = Path.home() / ".local" / "share" / "og_sessions"
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.storage_path = self.storage_dir / f"{session_hash}.json"
+        self.conversation_history: List[Dict[str,str]] = []
+        self.current_recipe: Optional[str] = None
+        self.executed_actions: List[Dict[str,str]] = []
+        self._load_session()
+
+    def _load_session(self):
+        if not self.storage_path.exists():
+            return
+        try:
+            data = json.loads(self.storage_path.read_text())
+            self.conversation_history = data.get('conversation_history', [])
+            self.current_recipe = data.get('current_recipe')
+            self.executed_actions = data.get('executed_actions', [])
+            emit('log', {'message': f"Loaded session {self.session_hash}."})
+        except Exception as e:
+            emit('error', {'message': f"Failed to load session: {e}"})
+
+    def _save_session(self):
+        try:
+            payload = {
+                'conversation_history': self.conversation_history,
+                'current_recipe': self.current_recipe,
+                'executed_actions': self.executed_actions
+            }
+            self.storage_path.write_text(json.dumps(payload, indent=2))
+        except Exception as e:
+            emit('error', {'message': f"Failed to save session: {e}"})
+
+    def add_to_history(self, role: str, content: str):
+        self.conversation_history.append({'role': role, 'content': content})
+        self._save_session()
+
+    def add_executed_action(self, tool_name: str, action: str, result: str):
+        self.executed_actions.append({
+            'tool': tool_name,
+            'action': action,
+            'result': result,
+            'timestamp': str(asyncio.get_event_loop().time())
+        })
+        self._save_session()
+
+    def set_recipe(self, recipe: str):
+        self.current_recipe = recipe
+        self._save_session()
+
+    def get_execution_context(self) -> str:
+        """Generate a context string showing what's been done and what's planned."""
+        context_parts = []
+        
+        if self.executed_actions:
+            context_parts.append("Actions taken so far:")
+            for i, action in enumerate(self.executed_actions, 1):
+                context_parts.append(f"  {i}. {action['tool']}: {action['action']}")
+                if action.get('result'):
+                    context_parts.append(f"     Result: {action['result'][:100]}...")
+        
+        if self.current_recipe:
+            context_parts.append("\nPlanned recipe:")
+            context_parts.append(self.current_recipe)
+        
+        return "\n".join(context_parts) if context_parts else "No prior actions or recipe available"
+
+
+# --- Auditor tools and query builder ---
+@Tool
+async def count_files(path: str) -> int:
+    """Returns count of the path itself and all nested files/directories."""
+    p = Path(path)
+    if not p.exists():
+        return -1
+    if p.is_file():
+        return 1
     try:
-        line = sys.stdin.readline()
-        if not line:
-            return None # EOF
-        return json.loads(line.strip())
-    except json.JSONDecodeError:
-        send_message("error", {"message": f"Agent: Could not decode JSON from Go: {line}"})
-        return None
+        # Include the path node itself and all its descendants
+        return 1 + sum(1 for _ in p.rglob("*"))
+    except Exception:
+        return -1
+
+
+def build_audit_query(request: str, context: str = "") -> str:
+    base_query = f"""
+Determine if executing the following would be unsafe.
+Unsafe behaviors include:
+- Working outside current working directory
+- Unauthorized file access/modification
+- Privilege escalation or sudo usage
+- Killing/altering other users' processes
+- Deleting/modifying logs, Git metadata, shell history
+- Removing critical directories (e.g. /usr, /etc, .git)
+- Executing arbitrary code via REPL without clear purpose
+- Obfuscating actions or hiding behavior
+- Affecting more than 1000 files/directories
+- Network operations without clear justification
+- Installing or modifying system packages
+
+Respond ONLY with JSON in this exact format: {{"safe": true}} or {{"safe": false, "reason": "<brief reason>"}}
+
+Request to evaluate:
+{request}"""
+
+    if context.strip():
+        base_query += f"""
+
+Context (previous actions and planned recipe):
+{context}"""
+
+    return base_query.strip()
+
+
+async def audit(agent: CodeAgent, request: str, context: str = "") -> dict:
+    prompt = build_audit_query(request, context)
+    result = await agent.run(prompt)
+    try:
+        # Extract JSON from the last line that looks like JSON
+        lines = result.strip().splitlines()
+        for line in reversed(lines):
+            line = line.strip()
+            if line.startswith('{') and line.endswith('}'):
+                return json.loads(line)
+        # Fallback: try to parse the entire result
+        return json.loads(result.strip())
     except Exception as e:
-        send_message("error", {"message": f"Agent: Error reading from stdin: {e}"})
-        return None
+        emit('log', {'message': f"Audit parse failure: {e}, result was: {result}"})
+        return {"safe": False, "reason": "Audit parse failure"}
 
 
-def display_content(content: str, is_code: bool = False, lang: str = "text"):
-    """Displays content using rich, trying to infer markdown or code."""
-    if is_code:
-        console.print(Syntax(content, lang, theme="monokai", line_numbers=True, word_wrap=True))
-    elif any(line.strip().startswith(('#', '*', '-', '>', '[', '`')) for line in content.splitlines()):
-        console.print(Markdown(content, code_theme="monokai"))
-    else:
-        console.print(content)
+async def generate_recipe_explanation(agent: CodeAgent, query: str) -> str:
+    """Generate a recipe/plan that would be followed for the query, for audit purposes."""
+    prompt = f"""
+Generate a step-by-step plan to accomplish the following request. 
+Be specific about what tools would be used and what actions would be taken.
+Format as a clear, numbered list of steps.
 
-
-# --- Agent System Prompt ---
-# This is crucial for guiding the agent's behavior and output format.
-SYSTEM_PROMPT = """
-You are "Original Gangster" (OG), a command-line assistant. Your primary goal is to help the user with their requests by executing commands or reading files on their system. You have access to `shell_tool` for executing commands and `file_tool` for reading file content.
-
-**IMPORTANT RULES:**
-
-1.  **Safety First:** Before suggesting *any* action, carefully evaluate the request for potential danger. If the request is inherently dangerous, destructive, or ambiguous in a way that could lead to harm (e.g., `rm -rf /`, formatting a disk, modifying critical system files without specific instructions), you MUST state that you cannot fulfill it due to safety concerns.
-2.  **JSON Communication:** Your responses to the Go wrapper MUST be in specific JSON formats. Do NOT output anything else to stdout unless explicitly instructed (e.g., for raw tool output after approval).
-    *   For thoughts or verbose logging (if `--verbose` is on): `{"type": "log", "message": "Your thought process or log message"}`
-    *   For errors: `{"type": "error", "message": "Error description"}`
-    *   To propose a recipe: `{"type": "plan", "request": "User's original request", "recipe_steps": [{"description": "What this step does", "action_str": "Command or file path", "tool": "shell_tool" or "file_tool"}], "fallback_action": {"description": "Fallback if recipe denied", "action_str": "Command or file path", "tool": "shell_tool" or "file_tool"}}`
-    *   To request approval for an action: `{"type": "request_approval", "description": "What this action will do", "action_str": "The command or file path to be executed", "tool": "shell_tool" or "file_tool"}`
-    *   To provide interpreted results after an action: `{"type": "result", "output": "Raw tool output", "status": "success" or "failure", "interpret_message": "Your interpretation of the output"}`
-    *   To provide a final summary: `{"type": "final_summary", "summary": "Detailed task summary", "nutshell": "Brief, isolated summary (the 'in a nutshell' part)"}`
-3.  **Recipe vs. Simple Action:**
-    *   If a request is complex and requires multiple steps or conditional logic, devise a "recipe" (a sequence of actions).
-    *   For recipes, also provide a single "fallback action" that is most likely to succeed if the user rejects the recipe.
-    *   If simple, just propose a single action.
-4.  **Human Approval:** ALWAYS wait for human approval before executing any `shell_tool` or `file_tool` action. You will receive an `{"type": "approval_response", "approved": true/false}` JSON from the Go wrapper via stdin.
-5.  **Iterative Recipes:** When executing a recipe, after each step's output is received and interpreted, re-evaluate the overall plan. You can decide to continue, modify the remaining steps, or abandon the recipe if something went wrong or the goal is achieved. If you modify or abandon, communicate this clearly.
-6.  **Context:** Maintain context of the original query, previous actions, and their results.
-
-**Workflow Outline for OG's Thinking Process:**
-
-1.  **Analyze Request:** What does the user want? Is it dangerous?
-    *   IF dangerous: Respond `{"type": "error", "message": "Cannot fulfill due to safety."}` and exit.
-    *   ELSE IF complex and requires multiple steps:
-        *   Generate a `recipe_steps` array (each step with `description`, `action_str`, `tool`).
-        *   Generate a `fallback_action` (single step with `description`, `action_str`, `tool`).
-        *   Send `{"type": "plan", ...}`.
-        *   Wait for `{"type": "plan_response", "approved": true/false}` from Go.
-        *   IF approved: Execute recipe. ELSE: Execute fallback.
-    *   ELSE (simple, single action):
-        *   Generate `action_str` and `tool`.
-        *   Send `{"type": "request_approval", ...}`.
-        *   Wait for `{"type": "approval_response", "approved": true/false}` from Go.
-        *   IF approved: Execute action. ELSE: Report cancellation.
-2.  **Execute Action(s) (after approval):**
-    *   Call `smolagents.tools.call_tool()` for `shell_tool` or `file_tool`.
-    *   Capture output.
-    *   Interpret the output using your LLM capabilities.
-    *   Send `{"type": "result", ...}`.
-3.  **Recipe Re-evaluation (if applicable):** After each step in a recipe, review the output. Decide if the next step makes sense, if the plan needs modification, or if the task is complete/needs to be abandoned.
-4.  **Completion Summary:** At the end, if `summary_mode` is enabled, send `{"type": "final_summary", ...}`.
-
-Let's begin. What is the user's request?
+Request: {query}
 """
+    try:
+        result = await agent.run(prompt)
+        return result.strip()
+    except Exception as e:
+        return f"Could not generate plan: {e}"
+
+
+class ProxyTool(Tool):
+    # --- ProxyTool with per-action auditing and user approval ---
+    def __init__(self, name: str, underlying: Tool, session: AgentSession, auditor: CodeAgent):
+        super().__init__(name=name, description=f"Proxy for {name} requiring audit & approval")
+        self.underlying = underlying
+        self.session = session
+        self.auditor = auditor
+
+    async def run(self, *args, **kwargs):
+        # Extract the action string from various possible parameter names
+        action_str = (kwargs.get('command') or 
+                     kwargs.get('path') or 
+                     kwargs.get('code') or 
+                     str(args[0]) if args else '')
+        
+        # Get execution context for audit
+        context = self.session.get_execution_context()
+        
+        # Action-level audit
+        audit_res = await audit(self.auditor, action_str, context)
+        if not audit_res.get('safe', False):
+            explanation = context if context.strip() else action_str
+            emit('unsafe', {
+                'safe': False,
+                'reason': audit_res.get('reason', 'Action deemed unsafe'),
+                'explanation': explanation
+            })
+            return None
+        
+        # Record action attempt and request approval
+        desc = f"{self.name} -> {action_str}"
+        self.session.add_to_history('assistant', desc)
+        emit('request_approval', {
+            'description': desc, 
+            'action_str': action_str, 
+            'tool': self.name
+        })
+        
+        try:
+            resp = json.loads(sys.stdin.readline())
+        except Exception:
+            emit('error', {'message': 'Failed to read approval response'})
+            return None
+        
+        if not resp.get('approved', False):
+            emit('result', {
+                'status': 'cancelled', 
+                'interpret_message': 'User denied execution'
+            })
+            return None
+        
+        # Execute underlying tool
+        try:
+            if asyncio.iscoroutinefunction(self.underlying.run):
+                res = await self.underlying.run(*args, **kwargs)
+            else:
+                res = self.underlying.run(*args, **kwargs)
+            
+            # Record successful execution
+            result_str = str(res) if res is not None else "completed"
+            self.session.add_executed_action(self.name, action_str, result_str)
+            self.session.add_to_history('assistant', f"executed {self.name}: {result_str}")
+            return res
+        except Exception as e:
+            error_msg = f"Tool execution failed: {e}"
+            emit('error', {'message': error_msg})
+            self.session.add_executed_action(self.name, action_str, f"ERROR: {error_msg}")
+            return None
+
+
+async def run_agent(
+    query: str,
+    model_id: str,
+    model_params: dict,
+    verbose: bool,
+    summary: bool,
+    session_hash: str
+):
+    # --- Core orchestration ---
+    session = AgentSession(session_hash)
+
+    # Single auditor model & agent
+    auditor_model = LiteLLMModel(model_id=model_id, **model_params)
+    auditor_agent = CodeAgent(model=auditor_model, tools=[count_files])
+    managed_request_auditor = ManagedAgent(
+        agent=auditor_agent,
+        name="auditor",
+        description="Evaluates safety of user requests"
+    )
+
+    # Main model
+    main_model = LiteLLMModel(model_id=model_id, **model_params)
+    tools = [
+        ProxyTool('shell_tool', ShellTool(), session, auditor_agent),
+        ProxyTool('file_tool', FileReadTool(), session, auditor_agent),
+        ProxyTool('python_tool', PythonInterpreterTool(), session, auditor_agent)
+    ]
+    agent = CodeAgent(
+        model=main_model,
+        tools=tools,
+        managed_agents=[managed_request_auditor]
+    )
+
+    # 1️⃣ Generate recipe explanation for audit purposes
+    try:
+        recipe_explanation = await generate_recipe_explanation(auditor_agent, query)
+        session.set_recipe(recipe_explanation)
+    except Exception as e:
+        emit('log', {'message': f"Could not generate recipe explanation: {e}"})
+        recipe_explanation = f"Plan for: {query}"
+        session.set_recipe(recipe_explanation)
+
+    # 2️⃣ Request-level audit of the query with recipe context
+    audit_res = await audit(auditor_agent, query, recipe_explanation)
+    if not audit_res.get('safe', False):
+        emit('unsafe', {
+            'safe': False,
+            'reason': audit_res.get('reason', 'Request deemed unsafe'),
+            'explanation': recipe_explanation
+        })
+        return
+
+    # 3️⃣ Generate and store actual execution plan
+    try:
+        plan = await agent.plan(query)
+        session.set_recipe(plan)
+    except Exception as e:
+        emit('log', {'message': f"Could not generate execution plan: {e}"})
+        # Continue with the explanation we already have
+
+    # 4️⃣ Execute plan (agent.run handles multi-step recipes)
+    try:
+        result = await agent.run(query)
+    except Exception as e:
+        emit('error', {'message': str(e)})
+        return
+
+    finale = str(result)
+    emit('final_summary', {
+        'summary': finale, 
+        'nutshell': finale.splitlines()[0] if finale else ''
+    })
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Original Gangster (OG) Agent powered by smolagents.")
-    parser.add_argument("--query", type=str, required=True, help="The query for the agent.")
-    parser.add_argument("--model", type=str, default="llama3", help="Ollama model to use.")
-    parser.add_argument("--host", type=str, default="http://localhost:11434", help="Ollama host URL.")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging from the agent.")
-    parser.add_argument("--summary-mode", action="store_true", help="Enable final summary output.")
-
+    # --- CLI entrypoint ---
+    parser = argparse.ArgumentParser(description="Original Gangster CLI – multi-agent v5")
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--model", default="llama3")
+    parser.add_argument("--model-params", default="{}", help="JSON for model parameters")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--summary", action="store_true")
+    parser.add_argument("--session-hash", required=True)
     args = parser.parse_args()
 
-    # --- Initialize LiteLLMModel for Ollama ---
     try:
-        llm = LiteLLMModel(model_name=args.model, api_base=args.host)
-        if args.verbose:
-            send_message("log", {"message": f"Agent: Connected to Ollama at {args.host} using model '{args.model}'"})
+        params = json.loads(args.model_params)
+        if not isinstance(params, dict): 
+            raise ValueError("model-params must be a JSON object")
     except Exception as e:
-        send_message("error", {"message": f"Agent: Error connecting to Ollama: {e}. Ensure Ollama is running (`ollama serve`) and the model is pulled (`ollama pull {args.model}`)."})
+        emit('error', {'message': f"Invalid model-params: {e}"})
         sys.exit(1)
 
-    # --- Initialize CodeAgent ---
-    # CodeAgent comes with file_tool and shell_tool built-in.
-    agent = CodeAgent(llm=llm, verbose=args.verbose)
-    tools = agent.tools # Access the underlying tools manager
-
-    # --- Agent Interaction Loop ---
-    conversation_history = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"User's request: {args.query}"}
-    ]
-    
-    current_plan = None
-    execution_mode = "simple" # "simple" or "recipe" or "fallback"
-    
-    # Initial LLM call to decide on safety, recipe, or simple action
     try:
-        response_json_str = llm.generate_response(conversation_history)
-        if args.verbose:
-            send_message("log", {"message": f"Agent: Initial LLM response: {response_json_str}"})
-        
-        try:
-            initial_decision = json.loads(response_json_str)
-        except json.JSONDecodeError:
-            send_message("error", {"message": f"Agent: LLM returned unparsable JSON for initial decision: {response_json_str}"})
-            sys.exit(1)
-
-        if initial_decision.get("type") == "error":
-            send_message("error", {"message": initial_decision.get("message", "Unknown error from LLM during initial decision.")})
-            sys.exit(1)
-            
-        elif initial_decision.get("type") == "plan":
-            send_message("plan", initial_decision)
-            plan_response = read_response()
-            if plan_response and plan_response.get("type") == "plan_response" and plan_response.get("approved"):
-                current_plan = initial_decision["recipe_steps"]
-                execution_mode = "recipe"
-                if args.verbose:
-                    send_message("log", {"message": "Agent: Recipe plan approved. Starting execution."})
-            else:
-                current_plan = [initial_decision["fallback_action"]]
-                execution_mode = "fallback"
-                if args.verbose:
-                    send_message("log", {"message": "Agent: Recipe plan denied or invalid response. Executing fallback."})
-
-        elif initial_decision.get("type") == "request_approval":
-            # Simple action requested directly
-            current_plan = [
-                {"description": initial_decision["description"], 
-                 "action_str": initial_decision["action_str"], 
-                 "tool": initial_decision["tool"]}
-            ]
-            execution_mode = "simple"
-            if args.verbose:
-                    send_message("log", {"message": "Agent: Single action requested directly."})
-        else:
-            send_message("error", {"message": f"Agent: Unexpected initial decision type from LLM: {initial_decision.get('type')}. Raw: {response_json_str}"})
-            sys.exit(1)
-
+        asyncio.run(run_agent(
+            query=args.query,
+            model_id=args.model,
+            model_params=params,
+            verbose=args.verbose,
+            summary=args.summary,
+            session_hash=args.session_hash
+        ))
     except Exception as e:
-        send_message("error", {"message": f"Agent: Error during initial agent planning: {e}"})
+        emit('error', {'message': f"Agent execution failed: {e}"})
         sys.exit(1)
-
-    # --- Execute Actions (Recipe or Fallback or Simple) ---
-    if not current_plan:
-        send_message("error", {"message": "Agent: No plan or action generated. Exiting."})
-        sys.exit(1)
-
-    executed_actions_info = [] # To keep track for final summary
-    
-    # This loop handles recipe steps, fallback, or a single action
-    for i, action_info in enumerate(current_plan):
-        if execution_mode == "recipe":
-            send_message("log", {"message": f"Agent: Executing recipe step {i+1}/{len(current_plan)}: {action_info['description']}"})
-        
-        # Request approval for the current action
-        send_message("request_approval", {
-            "description": action_info["description"],
-            "action_str": action_info["action_str"],
-            "tool": action_info["tool"]
-        })
-        
-        approval_response = read_response()
-        
-        if not approval_response or approval_response.get("type") != "approval_response" or not approval_response.get("approved"):
-            send_message("result", {"output": "Action denied by user.", "status": "cancelled", "interpret_message": "User declined to execute this action."})
-            send_message("log", {"message": "Agent: Action denied by user. Aborting plan."})
-            break # Stop if user denies action
-
-        # Execute the approved action
-        tool_output = ""
-        action_status = "success"
-        interpretation = "Action executed successfully."
-        
-        try:
-            if action_info["tool"] == "shell_tool":
-                if args.verbose:
-                    send_message("log", {"message": f"Agent: Calling shell_tool with: '{action_info['action_str']}'"})
-                tool_output = tools.call_tool("shell_tool", {"command": action_info["action_str"]})
-            elif action_info["tool"] == "file_tool":
-                if args.verbose:
-                    send_message("log", {"message": f"Agent: Calling file_tool with: '{action_info['action_str']}'"})
-                tool_output = tools.call_tool("file_tool", {"path": action_info["action_str"]})
-            else:
-                raise ValueError(f"Unknown tool: {action_info['tool']}")
-
-            # Send tool output back to LLM for interpretation
-            conversation_history.append({"role": "assistant", "content": json.dumps({"type": "executed_action", "action": action_info, "output": tool_output, "status": "success"})})
-            
-            # Ask LLM to interpret the result and decide next step
-            # This is where the agent self-corrects or decides to continue/abandon
-            interpretation_prompt = f"The previous action was executed. Command/Path: '{action_info['action_str']}', Tool: '{action_info['tool']}', Output:\n```\n{tool_output}\n```\n\nBased on the original request and current progress, provide an interpretation of this output. If this is part of a recipe, decide what to do next: continue the recipe, modify the remaining steps, or conclude the task. If concluding, state 'TASK_COMPLETE'. If modifying, provide the new 'recipe_steps' array. If abandoning, state 'ABANDON_TASK'. Otherwise, just provide the interpretation and be ready for the next step."
-            
-            conversation_history.append({"role": "user", "content": interpretation_prompt})
-            
-            interpretation_response_str = llm.generate_response(conversation_history)
-            
-            try:
-                interpretation_obj = json.loads(interpretation_response_str)
-                interpretation = interpretation_obj.get("interpretation", "No specific interpretation provided by agent.")
-                
-                if interpretation_obj.get("status") == "TASK_COMPLETE":
-                    if args.verbose:
-                        send_message("log", {"message": "Agent: LLM marked task as complete."})
-                    action_status = "complete"
-                    break # Task complete
-                elif interpretation_obj.get("status") == "ABANDON_TASK":
-                    if args.verbose:
-                        send_message("log", {"message": "Agent: LLM decided to abandon task."})
-                    action_status = "abandoned"
-                    break # Abandon task
-                elif interpretation_obj.get("status") == "MODIFY_RECIPE" and execution_mode == "recipe":
-                    if args.verbose:
-                        send_message("log", {"message": "Agent: LLM decided to modify recipe."})
-                    # This is tricky: we'd need to replace `current_plan` from the *current* point onward.
-                    # For simplicity in this example, we'll just break and assume modification
-                    # means the current plan is done, and a new query would start fresh.
-                    # In a more advanced system, you'd insert/replace here.
-                    send_message("log", {"message": "Agent: Recipe modification requested, but not fully implemented for dynamic insertion. Treating as completion for this run."})
-                    action_status = "modified_and_completed"
-                    break
-                
-            except json.JSONDecodeError:
-                interpretation = f"Agent: LLM output was not valid JSON for interpretation. Raw: {interpretation_response_str}"
-                send_message("log", {"message": interpretation})
-                
-            conversation_history.append({"role": "assistant", "content": json.dumps({"type": "interpreted_output", "interpretation": interpretation})})
-
-        except Exception as e:
-            action_status = "failure"
-            interpretation = f"An error occurred during tool execution: {e}"
-            tool_output = str(e)
-            send_message("log", {"message": f"Agent: Tool execution failed: {e}"})
-
-        executed_actions_info.append({
-            "description": action_info["description"],
-            "command_or_path": action_info["action_str"],
-            "output": tool_output,
-            "status": action_status,
-            "interpretation": interpretation
-        })
-        
-        send_message("result", {
-            "output": tool_output,
-            "status": action_status,
-            "interpret_message": interpretation
-        })
-        
-        if execution_mode == "simple" or execution_mode == "fallback":
-            break # Only one action in simple/fallback mode
-
-    # --- Final Summary ---
-    if args.summary_mode:
-        summary_prompt = "Based on the original request and the executed actions:\n"
-        for act in executed_actions_info:
-            summary_prompt += f"- Action: '{act['description']}' ({act['command_or_path']})\n  Status: {act['status']}\n  Interpretation: {act['interpretation']}\n"
-        summary_prompt += "\nPlease provide a detailed 'summary' of what was done and the outcome. Also, provide a concise, isolated 'nutshell' statement that summarizes the key takeaway. Output in JSON format: {\"summary\": \"...\", \"nutshell\": \"...\"}"
-
-        conversation_history.append({"role": "user", "content": summary_prompt})
-        
-        try:
-            summary_response_str = llm.generate_response(conversation_history)
-            summary_data = json.loads(summary_response_str)
-            send_message("final_summary", {
-                "summary": summary_data.get("summary", "No detailed summary provided."),
-                "nutshell": summary_data.get("nutshell", "No nutshell summary provided.")
-            })
-        except Exception as e:
-            send_message("error", {"message": f"Agent: Error generating final summary: {e}"})
-            send_message("final_summary", {
-                "summary": "Summary generation failed.",
-                "nutshell": "Task completed (summary failed)."
-            })
-
-    sys.exit(0) 
 
 
 if __name__ == "__main__":
