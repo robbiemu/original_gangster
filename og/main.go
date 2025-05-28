@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/sha256"
+	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -94,6 +95,9 @@ var (
 	magenta = color.New(color.FgMagenta).SprintFunc()
 )
 
+//go:embed prompts/prompts.toml
+var embeddedPromptsFS embed.FS
+
 const configFileName = "og_config.toml"
 
 // Utility: data dir, config, history
@@ -121,8 +125,24 @@ func getHistoryPath() (string, error) {
 	return filepath.Join(dir, "history.json"), nil
 }
 
+func getPromptsDir() (string, error) {
+	dir, err := getDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "prompts"), nil
+}
+
+// Default prompts filename
+const defaultPromptsFileName = "prompts.toml"
+
 // Default config
 func saveDefaultConfig(path string) error {
+	// Ensure the parent directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	defaults := OGConfig{
 		ManagedAgent: ModelCfg{
 			Model: "ollama/llama3:latest",
@@ -145,10 +165,6 @@ func saveDefaultConfig(path string) error {
 		},
 	}
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	b, err := toml.Marshal(defaults)
 	if err != nil {
 		return err
@@ -158,6 +174,31 @@ func saveDefaultConfig(path string) error {
 	}
 	fmt.Println(green("✨ A starter config has been written to:"), cyan(path))
 	fmt.Print(yellow("Please update 'python_agent_path' to point to your agent script.\n"))
+
+	fmt.Println(green("✨ A starter config has been written to:"), cyan(path))
+	fmt.Print(yellow("Please update 'python_agent_path' to point to your agent script.\n"))
+
+	promptsDir, err := getPromptsDir()
+	if err != nil {
+		return fmt.Errorf("failed to get prompts directory: %w", err)
+	}
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create prompts directory: %w", err)
+	}
+
+	sourcePromptsContent, err := embeddedPromptsFS.ReadFile("prompts/" + defaultPromptsFileName)
+	if err != nil {
+		return fmt.Errorf("failed to read embedded prompts file: %w", err)
+	}
+
+	destinationPromptsPath := filepath.Join(promptsDir, defaultPromptsFileName)
+
+	if err := os.WriteFile(destinationPromptsPath, sourcePromptsContent, 0o644); err != nil {
+		return fmt.Errorf("failed to write prompts file to %s: %w", destinationPromptsPath, err)
+	}
+
+	fmt.Println(green("✨ Default prompts have been copied to:"), cyan(destinationPromptsPath))
+
 	return nil
 }
 
@@ -412,18 +453,12 @@ func handleAgentMessage(msg AgentMessage, sm *SessionManager) (bool, error) {
 	case "plan":
 		fmt.Printf("\n%s\n%s %s\n", yellow("🧠 Plan:"), blue("Request:"), msg.Request)
 
-		isSingleActionPlan := len(msg.RecipeSteps) == 1 && msg.FallbackAction == nil // Added fallback check to ensure it's truly single
-		var commandToSend string
-		var promptMessage string
+		// Determine if this is a multi-step recipe (has more than one command block or a fallback)
+		// A single-step plan has exactly one recipe step and no fallback.
+		isMultiStepRecipe := len(msg.RecipeSteps) > 1 || msg.FallbackAction != nil
 
-		if isSingleActionPlan {
-			fmt.Printf("\n%s\n", blue("Proposed Action:"))
-			s := msg.RecipeSteps[0]
-			fmt.Printf("  %s 1. %s\n      %s: %s (%s)\n", cyan("Action"), s.Description, yellow("Act"), s.Action, s.Tool)
-			promptMessage = "Approve this action?"
-			commandToSend = "execute_single_action" // New command for single actions
-		} else {
-			// This is a recipe (multi-step or fallback is present)
+		if isMultiStepRecipe {
+			// This is a multi-step recipe or has a fallback. Request overall recipe approval.
 			fmt.Printf("\n%s\n", blue("Steps:"))
 			for i, s := range msg.RecipeSteps {
 				fmt.Printf("  %s %d. %s\n      %s: %s (%s)\n", cyan("Step"), i+1, s.Description, yellow("Act"), s.Action, s.Tool)
@@ -431,41 +466,49 @@ func handleAgentMessage(msg AgentMessage, sm *SessionManager) (bool, error) {
 			if msg.FallbackAction != nil {
 				fmt.Printf("\n%s %s (%s)\n", yellow("Fallback:"), msg.FallbackAction.Action, msg.FallbackAction.Tool)
 			}
-			promptMessage = "Proceed with recipe?"
-			commandToSend = "execute_recipe" // Existing command for recipes
-		}
 
-		if promptForApproval(promptMessage) {
-			// Send command to Python based on plan type
-			return true, sm.sendCommand(commandToSend, nil)
+			if promptForApproval("Proceed with recipe?") {
+				// Send command to Python to execute recipe (implies pre-approval)
+				return true, sm.sendCommand("execute_recipe", nil)
+			} else {
+				// User denied the entire recipe
+				fmt.Println(yellow("🚫 Recipe denied by user. Session ending."))
+				// For now, no fallback execution on Go side. Python will exit.
+				return false, nil // End session
+			}
 		} else {
-			// If recipe or single action is denied at this initial stage, session ends.
-			// No explicit "execute_fallback" for single actions as they don't have one here.
-			// For recipes, denying means denying the whole recipe.
-			fmt.Println(yellow("🚫 Plan denied by user. Session ending."))
-			return false, nil // End session
+			// This is a single-step plan. No initial approval prompt.
+			// Just log what the agent plans to do and send the command to Python.
+			fmt.Printf("\n%s\n", blue("Proposed Action:"))
+			s := msg.RecipeSteps[0]
+			fmt.Printf("  %s 1. %s\n      %s: %s (%s)\n", cyan("Action"), s.Description, yellow("Act"), s.Action, s.Tool)
+			fmt.Println(yellow("Auto-proceeding to execution for individual step approval."))
+			// Send new command for single actions
+			return true, sm.sendCommand("execute_single_action", nil)
 		}
 
 	case "request_approval":
-		// This case is now for individual step approvals AFTER a recipe has been pre-approved
-		// and a deviation occurred, OR for the approval of the *single* action in a single-action plan.
+		// This case is now ONLY for individual step approvals (triggered by ProxyTool)
 		fmt.Printf("\n%s\n  %s %s\n  %s %s (%s)\n", yellow("🤖 Approval Needed"),
 			cyan("Desc:"), msg.Description,
 			yellow("Cmd:"), msg.Action, msg.Tool)
-		approved := promptForApproval("Execute step?") // Changed prompt wording
+		approved := promptForApproval("Execute step?") // Specific prompt for individual steps
 		// Send user approval response back to Python
 		return true, sm.sendCommand("user_approval_response", map[string]interface{}{"approved": approved})
+
+	case "final_summary":
+		// This is the new termination point after user denial or successful completion.
+		if sm.config.General.SummaryMode {
+			fmt.Printf("\n%s\n  %s %s\n  %s %s\n", green("🏁 Summary:"), cyan("Nutshell:"), msg.Nutshell, cyan("Details:"), msg.Summary)
+		}
+		return false, nil // Session ended
+
 	case "result":
 		fmt.Printf("\n%s %s%s\n%s %s\n", green("Result:"), getStatusEmoji(msg.Status), msg.Status,
 			blue("Info:"), msg.InterpretMessage)
 		if trimmed := strings.TrimSpace(msg.Output); trimmed != "" {
 			fmt.Printf("\n%s\n%s\n", green("Output:"), formatOutput(msg.Output))
 		}
-	case "final_summary":
-		if sm.config.General.SummaryMode {
-			fmt.Printf("\n%s\n  %s %s\n  %s %s\n", green("🏁 Summary:"), cyan("Nutshell:"), msg.Nutshell, cyan("Details:"), msg.Summary)
-		}
-		return false, nil // Session ended
 	default:
 		if msg.Message != "" {
 			fmt.Printf(yellow("Unknown message type: %s\n"), msg.Type)
