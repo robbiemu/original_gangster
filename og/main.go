@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,19 +15,37 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/pelletier/go-toml/v2"
 )
 
-// OGConfig holds CLI-configurable options loaded from JSON.
-type OGConfig struct {
-	OllamaModel     string `json:"ollama_model"`
-	OllamaHost      string `json:"ollama_host"`
-	PythonAgentPath string `json:"python_agent_path"`
-	SummaryMode     bool   `json:"summary_mode"`
-	VerboseAgent    bool   `json:"verbose_agent"`
-	SessionTimeout  int    `json:"session_timeout_minutes"`
+// Configuration structs
+type ModelCfg struct {
+	Model  string                 `toml:"model"`
+	Params map[string]interface{} `toml:"model_params"`
 }
 
-// AgentMessage represents any JSON message from the Python agent.
+type GeneralCfg struct {
+	PythonAgentPath string `toml:"python_agent_path"`
+	SummaryMode     bool   `toml:"summary_mode"`
+	VerboseAgent    bool   `toml:"verbose_agent"`
+	SessionTimeout  int    `toml:"session_timeout_minutes"`
+}
+
+type OGConfig struct {
+	ManagedAgent ModelCfg   `toml:"managed_agent"`
+	AuditorAgent ModelCfg   `toml:"auditor_agent"`
+	General      GeneralCfg `toml:"general"`
+}
+
+// History record
+type HistoryRecord struct {
+	TS    string `json:"ts"`
+	Hash  string `json:"hash"`
+	CWD   string `json:"cwd"`
+	Query string `json:"query"`
+}
+
+// Agent message types
 type AgentMessage struct {
 	Type             string        `json:"type"`
 	Message          string        `json:"message,omitempty"`
@@ -41,8 +60,9 @@ type AgentMessage struct {
 	InterpretMessage string        `json:"interpret_message,omitempty"`
 	Summary          string        `json:"summary,omitempty"`
 	Nutshell         string        `json:"nutshell,omitempty"`
-	Reason           string        `json:"reason,omitempty"`      // unsafe reason
-	Explanation      string        `json:"explanation,omitempty"` // unsafe details
+	Reason           string        `json:"reason,omitempty"`
+	Explanation      string        `json:"explanation,omitempty"`
+	Approved         bool          `json:"approved,omitempty"`
 }
 
 // AgentAction models a single step in a recipe or fallback.
@@ -52,13 +72,7 @@ type AgentAction struct {
 	Tool        string `json:"tool"`
 }
 
-// ApprovalResponse is sent back to Python after user approval prompts.
-type ApprovalResponse struct {
-	Type     string `json:"type"`
-	Approved bool   `json:"approved"`
-}
-
-// SessionManager orchestrates the Python subprocess and IPC.
+// Session manager
 type SessionManager struct {
 	currentHash   string
 	sessionStart  time.Time
@@ -70,6 +84,7 @@ type SessionManager struct {
 	mu            sync.Mutex
 }
 
+// ANSI helpers
 var (
 	green   = color.New(color.FgGreen).SprintFunc()
 	blue    = color.New(color.FgBlue).SprintFunc()
@@ -79,25 +94,74 @@ var (
 	magenta = color.New(color.FgMagenta).SprintFunc()
 )
 
-const configFileName = "og_config.json"
+const configFileName = "og_config.toml"
 
-// generateSessionHash produces a short hash to persist session state.
-func generateSessionHash(query string, timestamp time.Time) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s_%d", query, timestamp.Unix())))
-	return fmt.Sprintf("%x", h)[:12]
-}
-
-// getConfigPath returns the path to ~/.local/share/og_config.json
-func getConfigPath() (string, error) {
+// Utility: data dir, config, history
+func getDataDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".local", "share")
+	return filepath.Join(home, ".local", "share", "og"), nil
+}
+
+func getConfigPath() (string, error) {
+	dir, err := getDataDir()
+	if err != nil {
+		return "", err
+	}
 	return filepath.Join(dir, configFileName), nil
 }
 
-// loadConfig reads and unmarshals the JSON config.
+func getHistoryPath() (string, error) {
+	dir, err := getDataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "history.json"), nil
+}
+
+// Default config
+func saveDefaultConfig(path string) error {
+	defaults := OGConfig{
+		ManagedAgent: ModelCfg{
+			Model: "ollama/llama3:latest",
+			Params: map[string]interface{}{
+				"base_url": "http://localhost:11435",
+			},
+		},
+		AuditorAgent: ModelCfg{
+			Model: "ollama/gemma3:27b-it",
+			Params: map[string]interface{}{
+				"base_url":    "http://localhost:11435",
+				"temperature": 0.2,
+			},
+		},
+		General: GeneralCfg{
+			PythonAgentPath: "~/.local/share/og/agent.py",
+			SummaryMode:     true,
+			VerboseAgent:    false,
+			SessionTimeout:  30,
+		},
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	b, err := toml.Marshal(defaults)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		return err
+	}
+	fmt.Println(green("✨ A starter config has been written to:"), cyan(path))
+	fmt.Print(yellow("Please update 'python_agent_path' to point to your agent script.\n"))
+	return nil
+}
+
+// Config loader
 func loadConfig() (*OGConfig, error) {
 	path, err := getConfigPath()
 	if err != nil {
@@ -108,83 +172,139 @@ func loadConfig() (*OGConfig, error) {
 		return nil, err
 	}
 	var cfg OGConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(cfg.PythonAgentPath, "~/") {
-		home, _ := os.UserHomeDir()
-		cfg.PythonAgentPath = filepath.Join(home, cfg.PythonAgentPath[2:])
+
+	// Expand ~ in paths
+	expandPath := func(p string) string {
+		if strings.HasPrefix(p, "~/") {
+			home, _ := os.UserHomeDir()
+			return filepath.Join(home, p[2:])
+		}
+		return p
 	}
+	cfg.General.PythonAgentPath = expandPath(cfg.General.PythonAgentPath)
+
 	return &cfg, nil
 }
 
-// saveDefaultConfig writes a starter config with placeholders.
-func saveDefaultConfig(path string) error {
-	defaults := OGConfig{
-		OllamaModel:     "llama3",
-		OllamaHost:      "http://localhost:11434",
-		PythonAgentPath: "~/.local/share/og_agent.py",
-		SummaryMode:     true,
-		VerboseAgent:    false,
-		SessionTimeout:  30,
+// History persistence
+func appendHistory(rec HistoryRecord) {
+	path, err := getHistoryPath()
+	if err != nil {
+		return
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(defaults, "", "  ")
+	_ = os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		return
 	}
-	if err := os.WriteFile(path, b, 0644); err != nil {
-		return err
-	}
-	fmt.Printf(yellow("Created default config at %s\n"), path)
-	fmt.Print(yellow("Please update 'python_agent_path' to point to your agent script.\n"))
-	return nil
+	defer f.Close()
+	b, _ := json.Marshal(rec)
+	f.Write(b)
+	f.Write([]byte("\n"))
 }
 
-// startPythonAgent launches the Python subprocess for planning or execution.
-func (sm *SessionManager) startPythonAgent(query, mode string) error {
+// Helper to create short session hash
+func generateSessionHash(query string, timestamp time.Time) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s_%d", query, timestamp.Unix())))
+	return fmt.Sprintf("%x", h)[:12]
+}
+
+// Python agent management
+func (sm *SessionManager) startPythonAgent(query string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	args := []string{
-		sm.config.PythonAgentPath,
+	// Prepare model param JSON strings
+	mParams, _ := json.Marshal(sm.config.ManagedAgent.Params)
+	aParams, _ := json.Marshal(sm.config.AuditorAgent.Params)
+
+	wd, _ := os.Getwd()
+
+	pythonAgentFilePath := sm.config.General.PythonAgentPath
+
+	moduleFileName := filepath.Base(pythonAgentFilePath)
+	moduleName := strings.TrimSuffix(moduleFileName, ".py")
+
+	packageDir := filepath.Dir(pythonAgentFilePath)
+	packageName := filepath.Base(packageDir)
+
+	pythonPackageRootPath := filepath.Dir(packageDir)
+
+	fullModulePath := fmt.Sprintf("%s.%s", packageName, moduleName)
+
+	cmdArgs := []string{
+		"python3",
+		"-m",
+		fullModulePath,
 		"--session-hash", sm.currentHash,
-		"--query", query,
-		"--model", sm.config.OllamaModel,
-		"--api-base", sm.config.OllamaHost,
-	}
-	if sm.config.VerboseAgent {
-		args = append(args, "--verbose")
-	}
-	if sm.config.SummaryMode {
-		args = append(args, "--summary-mode")
-	}
-	switch mode {
-	case "recipe":
-		args = append(args, "--execute-recipe")
-	case "fallback":
-		args = append(args, "--execute-fallback")
+		"--query", query, // Initial query is passed here for planning
+		"--workdir", wd,
+		"--model", sm.config.ManagedAgent.Model,
+		"--model-params", string(mParams),
+		"--auditor-model", sm.config.AuditorAgent.Model,
+		"--auditor-params", string(aParams),
 	}
 
-	sm.pythonCmd = exec.Command("python3", args...)
-	var err error
-	sm.stdinPipe, err = sm.pythonCmd.StdinPipe()
+	if sm.config.General.VerboseAgent {
+		cmdArgs = append(cmdArgs, "--verbose")
+	}
+	if sm.config.General.SummaryMode {
+		cmdArgs = append(cmdArgs, "--summary-mode")
+	}
+
+	sm.pythonCmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+
+	// Set the PYTHONPATH environment variable for the command.
+	env := os.Environ() // Get a copy of the current environment
+
+	existingPythonPath := ""
+	for _, e := range env {
+		if strings.HasPrefix(e, "PYTHONPATH=") {
+			existingPythonPath = strings.TrimPrefix(e, "PYTHONPATH=")
+			break
+		}
+	}
+
+	newPythonPathValue := pythonPackageRootPath
+	if existingPythonPath != "" {
+		newPythonPathValue = existingPythonPath + string(os.PathListSeparator) + pythonPackageRootPath
+	}
+
+	sm.pythonCmd.Env = append(env, "PYTHONPATH="+newPythonPathValue)
+
+	stdin, err := sm.pythonCmd.StdinPipe()
 	if err != nil {
 		return err
 	}
+	sm.stdinPipe = stdin
+
 	stdout, err := sm.pythonCmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
+	sm.stdoutScanner = bufio.NewScanner(stdout)
+
+	// Increase the buffer size for stdout scanner to handle potentially large JSON lines.
+	const maxScanTokenSize = 1024 * 1024     // 1 MB
+	buf := make([]byte, 0, maxScanTokenSize) // Create a buffer slice with desired capacity
+	sm.stdoutScanner = bufio.NewScanner(stdout)
+	sm.stdoutScanner.Buffer(buf, maxScanTokenSize) // Set the buffer and maximum token size
+
 	stderr, err := sm.pythonCmd.StderrPipe()
 	if err != nil {
 		return err
 	}
-	sm.stdoutScanner = bufio.NewScanner(stdout)
 	sm.stderrScanner = bufio.NewScanner(stderr)
+	go func() {
+		for sm.stderrScanner.Scan() {
+			line := sm.stderrScanner.Text()
+			fmt.Fprintln(os.Stderr, magenta("[PY STDERR]"), line)
+		}
+	}()
 
 	if err := sm.pythonCmd.Start(); err != nil {
 		return err
@@ -192,12 +312,17 @@ func (sm *SessionManager) startPythonAgent(query, mode string) error {
 	return nil
 }
 
-// sendApproval marshals and sends an approval response.
-func (sm *SessionManager) sendApproval(approved bool, responseType string) error {
+// sendCommand marshals and sends a generic command to Python.
+func (sm *SessionManager) sendCommand(cmdType string, data map[string]interface{}) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	resp := ApprovalResponse{Type: responseType, Approved: approved}
-	b, err := json.Marshal(resp)
+
+	payload := map[string]interface{}{"type": cmdType}
+	for k, v := range data {
+		payload[k] = v
+	}
+
+	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -205,26 +330,16 @@ func (sm *SessionManager) sendApproval(approved bool, responseType string) error
 	return err
 }
 
-// stop terminates the Python subprocess and closes pipes.
-func (sm *SessionManager) stop() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	if sm.stdinPipe != nil {
-		sm.stdinPipe.Close()
-	}
-	if sm.pythonCmd != nil && sm.pythonCmd.Process != nil {
-		sm.pythonCmd.Process.Kill()
-		sm.pythonCmd.Wait()
-	}
-}
-
-// runLoop reads NDJSON messages and dispatches them.
+// Main processing loop
 func (sm *SessionManager) runLoop() error {
 	for sm.stdoutScanner.Scan() {
-		line := sm.stdoutScanner.Text()
+		line := strings.TrimSpace(sm.stdoutScanner.Text())
+		if line == "" {
+			continue
+		}
 		var msg AgentMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			// Raw output
+			// Raw output or non-JSON log
 			fmt.Println(line)
 			continue
 		}
@@ -233,13 +348,38 @@ func (sm *SessionManager) runLoop() error {
 			return err
 		}
 		if !cont {
-			break
+			break // Agent signalled session end
 		}
 	}
 	if err := sm.stdoutScanner.Err(); err != nil && err != io.EOF {
 		return err
 	}
 	return nil
+}
+
+// Cleanup
+func (sm *SessionManager) stop() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.stdinPipe != nil {
+		sm.stdinPipe.Close() // Close stdin to signal EOF to Python
+	}
+	if sm.pythonCmd != nil && sm.pythonCmd.Process != nil {
+		// Give Python a moment to exit gracefully after stdin closure
+		done := make(chan struct{})
+		go func() {
+			sm.pythonCmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			// Python exited cleanly
+		case <-time.After(5 * time.Second):
+			// Timeout, force kill
+			fmt.Fprintln(os.Stderr, yellow("Python agent did not exit gracefully, forcing kill."))
+			sm.pythonCmd.Process.Kill()
+		}
+	}
 }
 
 // promptForApproval shows a yes/no prompt.
@@ -255,39 +395,66 @@ func promptForApproval(message string) bool {
 func handleAgentMessage(msg AgentMessage, sm *SessionManager) (bool, error) {
 	switch msg.Type {
 	case "log":
-		if sm.config.VerboseAgent {
+		if sm.config.General.VerboseAgent {
 			fmt.Printf("%s %s\n", magenta("[AGENT]"), msg.Message)
 		}
 	case "error":
 		fmt.Printf("%s %s", red("[ERROR]"), msg.Message)
-		return false, nil
+		return false, nil // End session on error
 	case "unsafe":
 		fmt.Printf("%s %s", red("[UNSAFE]"), msg.Reason)
-		if exp := strings.TrimSpace(msg.Explanation); exp != "" {
+		exp := strings.TrimSpace(msg.Explanation)
+		if exp != "" {
 			fmt.Println(yellow("Explanation:"))
 			fmt.Println(exp)
 		}
-		return false, nil
+		return false, nil // End session on unsafe
 	case "plan":
-		fmt.Printf("\n%s\n%s %s\n\n%s\n", yellow("🧠 Plan:"), blue("Request:"), msg.Request, blue("Steps:"))
-		for i, s := range msg.RecipeSteps {
-			fmt.Printf("  %s %d. %s\n      %s: %s (%s)\n", cyan("Step"), i+1, s.Description, yellow("Act"), s.Action, s.Tool)
-		}
-		if msg.FallbackAction != nil {
-			fmt.Printf("\n%s %s (%s)\n", yellow("Fallback:"), msg.FallbackAction.Action, msg.FallbackAction.Tool)
-		}
-		if promptForApproval("Proceed with recipe?") {
-			sm.stop()
-			return true, sm.startPythonAgent(msg.Request, "recipe")
+		fmt.Printf("\n%s\n%s %s\n", yellow("🧠 Plan:"), blue("Request:"), msg.Request)
+
+		isSingleActionPlan := len(msg.RecipeSteps) == 1 && msg.FallbackAction == nil // Added fallback check to ensure it's truly single
+		var commandToSend string
+		var promptMessage string
+
+		if isSingleActionPlan {
+			fmt.Printf("\n%s\n", blue("Proposed Action:"))
+			s := msg.RecipeSteps[0]
+			fmt.Printf("  %s 1. %s\n      %s: %s (%s)\n", cyan("Action"), s.Description, yellow("Act"), s.Action, s.Tool)
+			promptMessage = "Approve this action?"
+			commandToSend = "execute_single_action" // New command for single actions
 		} else {
-			sm.stop()
-			return true, sm.startPythonAgent(msg.Request, "fallback")
+			// This is a recipe (multi-step or fallback is present)
+			fmt.Printf("\n%s\n", blue("Steps:"))
+			for i, s := range msg.RecipeSteps {
+				fmt.Printf("  %s %d. %s\n      %s: %s (%s)\n", cyan("Step"), i+1, s.Description, yellow("Act"), s.Action, s.Tool)
+			}
+			if msg.FallbackAction != nil {
+				fmt.Printf("\n%s %s (%s)\n", yellow("Fallback:"), msg.FallbackAction.Action, msg.FallbackAction.Tool)
+			}
+			promptMessage = "Proceed with recipe?"
+			commandToSend = "execute_recipe" // Existing command for recipes
 		}
+
+		if promptForApproval(promptMessage) {
+			// Send command to Python based on plan type
+			return true, sm.sendCommand(commandToSend, nil)
+		} else {
+			// If recipe or single action is denied at this initial stage, session ends.
+			// No explicit "execute_fallback" for single actions as they don't have one here.
+			// For recipes, denying means denying the whole recipe.
+			fmt.Println(yellow("🚫 Plan denied by user. Session ending."))
+			return false, nil // End session
+		}
+
 	case "request_approval":
+		// This case is now for individual step approvals AFTER a recipe has been pre-approved
+		// and a deviation occurred, OR for the approval of the *single* action in a single-action plan.
 		fmt.Printf("\n%s\n  %s %s\n  %s %s (%s)\n", yellow("🤖 Approval Needed"),
 			cyan("Desc:"), msg.Description,
 			yellow("Cmd:"), msg.Action, msg.Tool)
-		sm.sendApproval(promptForApproval("Execute?"), "approval_response")
+		approved := promptForApproval("Execute step?") // Changed prompt wording
+		// Send user approval response back to Python
+		return true, sm.sendCommand("user_approval_response", map[string]interface{}{"approved": approved})
 	case "result":
 		fmt.Printf("\n%s %s%s\n%s %s\n", green("Result:"), getStatusEmoji(msg.Status), msg.Status,
 			blue("Info:"), msg.InterpretMessage)
@@ -295,14 +462,19 @@ func handleAgentMessage(msg AgentMessage, sm *SessionManager) (bool, error) {
 			fmt.Printf("\n%s\n%s\n", green("Output:"), formatOutput(msg.Output))
 		}
 	case "final_summary":
-		if sm.config.SummaryMode {
+		if sm.config.General.SummaryMode {
 			fmt.Printf("\n%s\n  %s %s\n  %s %s\n", green("🏁 Summary:"), cyan("Nutshell:"), msg.Nutshell, cyan("Details:"), msg.Summary)
 		}
-		return false, nil
+		return false, nil // Session ended
 	default:
-		fmt.Printf(yellow("Unknown message type: %s\n"), msg.Type)
+		if msg.Message != "" {
+			fmt.Printf(yellow("Unknown message type: %s\n"), msg.Type)
+			fmt.Println(msg.Message)
+		} else {
+			fmt.Printf(yellow("Unknown message type: %s (no message content)\n"), msg.Type)
+		}
 	}
-	return true, nil
+	return true, nil // Continue session
 }
 
 // getStatusEmoji returns a small icon for status.
@@ -328,46 +500,105 @@ func formatOutput(output string) string {
 	return strings.Join(lines, "\n")
 }
 
+func printHelp() {
+	fmt.Print(`OG: Command-line AI agent
+
+Usage:
+  og <prompt>             Run OG agent on a prompt (natural language or shell-like)
+  og init                 Write default config to ~/.local/share/og/og_config.toml
+  og --help, -h           Show this help message
+
+Examples:
+  og "summarize this repo"
+  og "generate a gitignore for Rust"
+  og "list files modified in last commit"
+
+Config:
+  Config file: ~/.local/share/og/og_config.toml
+
+Tips:
+- Set 'python_agent_path' in your config to your agent.py script
+- 'init' will generate a starter config file
+
+`)
+}
+
+// Main entry
 func main() {
-	// Handle "init" command
-	if len(os.Args) >= 2 && os.Args[1] == "init" {
+	helpFlag := flag.Bool("help", false, "show help message")
+	hFlag := flag.Bool("h", false, "show help message (shorthand)")
+
+	verboseFlag := flag.Bool("verbose", false, "run in verbose mode")
+
+	flag.Usage = printHelp
+	flag.Parse()
+
+	// If help is requested, show help and exit
+	if *helpFlag || *hFlag {
+		printHelp()
+		return
+	}
+
+	args := flag.Args() // Everything after flags
+
+	// "og init"
+	if len(args) >= 1 && args[0] == "init" {
 		if path, err := getConfigPath(); err == nil {
 			if err := saveDefaultConfig(path); err != nil {
-				fmt.Fprintln(os.Stderr, red("Init failed:"), err)
+				fmt.Println(red("Failed to write default config:"), err)
 				os.Exit(1)
 			}
-			os.Exit(0)
+			fmt.Println(green("OG config initialized."))
 		} else {
-			fmt.Fprintln(os.Stderr, red("Cannot locate config path:"), err)
+			fmt.Println(red("Failed to determine config path:"), err)
 			os.Exit(1)
 		}
+		return
 	}
-	// Load config
+
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, red("Config error:"), err)
-		fmt.Fprintln(os.Stderr, yellow("Run `og init` first"))
+		fmt.Println(red("Failed to load config:"), err)
+		fmt.Println(yellow("Run `og init` first to create a default configuration."))
 		os.Exit(1)
 	}
-	// Build query and session
-	query := strings.Join(os.Args[1:], " ")
+	if *verboseFlag {
+		cfg.General.VerboseAgent = true
+	}
+
+	if len(args) < 1 {
+		fmt.Println(yellow("Usage: og <prompt>"))
+		os.Exit(1)
+	}
+
+	query := strings.Join(args, " ")
+	cwd, _ := os.Getwd()
 	sessionHash := generateSessionHash(query, time.Now())
+	rec := HistoryRecord{
+		TS:    time.Now().Format(time.RFC3339),
+		Hash:  sessionHash,
+		CWD:   cwd,
+		Query: query,
+	}
+	appendHistory(rec)
+
 	sm := &SessionManager{
 		currentHash:  sessionHash,
 		sessionStart: time.Now(),
 		config:       cfg,
 	}
-	// Start initial plan
-	if err := sm.startPythonAgent(query, ""); err != nil {
-		fmt.Fprintln(os.Stderr, red("Failed to start agent:"), err)
+
+	// Start Python agent once for the session
+	if err := sm.startPythonAgent(query); err != nil {
+		fmt.Println(red("Error starting python agent:"), err)
 		os.Exit(1)
 	}
-	// Process until final_summary
+	defer sm.stop() // Ensure Python agent is stopped when Go program exits
+
+	// Run the main loop to process messages from Python
 	if err := sm.runLoop(); err != nil {
-		fmt.Fprintln(os.Stderr, red("Error during runLoop:"), err)
-		sm.stop()
+		fmt.Println(red("Error during agent loop:"), err)
 		os.Exit(1)
 	}
-	sm.stop()
 	fmt.Println(blue("🚀 OG session ended."))
 }

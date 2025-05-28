@@ -1,0 +1,213 @@
+import h5py
+import json
+from pathlib import Path
+import time
+from typing import Dict, List, Optional
+
+from .emitter import _EmitterCallable
+
+
+def check_session_exists_in_h5(session_hash: str) -> bool:
+    """Checks if a given session_hash exists as a group in the HDF5 state file."""
+    base_dir = Path.home() / ".local" / "share" / "og"
+    hdf5_path = base_dir / "agent_states.h5"
+
+    if not hdf5_path.exists():
+        return False
+    
+    try:
+        with h5py.File(hdf5_path, "r") as h5f:
+            return session_hash in h5f
+    except Exception: # Catch any HDF5 file access errors
+        return False
+
+
+class AgentSession:
+    """Manages session memory and stores current recipe (JSON + optional HDF5)."""
+
+    def __init__(self, session_hash: str, emit: _EmitterCallable):
+        self.session_hash = session_hash
+        self._emit = emit # dependency injection
+
+        base_dir = Path.home() / ".local" / "share" / "og"
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        self.json_path = base_dir / f"{session_hash}.json"
+        self.hdf5_path = base_dir / "agent_states.h5"
+
+        self.conversation_history: List[Dict[str, str]] = []
+        self.current_recipe: Optional[List[Dict[str, str]]] = None
+        self.fallback_action: Optional[Dict[str, str]] = None
+        self.executed_actions: List[Dict[str, str]] = []
+
+        # New state for recipe approval
+        self.recipe_preapproved: bool = False
+        self.next_expected_recipe_step_idx: int = 0
+        self.deviation_occurred: bool = False # New flag to track if agent deviated from pre-approved recipe
+
+        self._load_session()
+
+    # Internal helpers for HDF5 I/O
+    def _h5_write_json(self, group, key: str, obj):
+        payload_bytes = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
+        if key in group:
+            del group[key]
+        group.create_dataset(key, data=[payload_bytes], dtype=h5py.vlen_dtype(bytes), compression="gzip")
+
+    def _h5_load_json(self, group, key: str):
+        if key not in group:
+            return None
+        try:
+            loaded_bytes = group[key][0]
+            return json.loads(loaded_bytes.decode("utf-8"))
+        except Exception as e:
+            self._emit("error", {"message": f"Corrupt HDF5 dataset '{key}': {e}"})
+            return None
+
+    # Load / Save session --------------------------------------------------
+    def _load_session(self):
+        """Attempt HDF5 restore, fall back to JSON file."""
+        if self.hdf5_path.exists():
+            try:
+                with h5py.File(self.hdf5_path, "r") as h5f:
+                    if self.session_hash in h5f:
+                        grp = h5f[self.session_hash]
+                        self.conversation_history = self._h5_load_json(grp, "memory") or []
+                        self.current_recipe = self._h5_load_json(grp, "recipe")
+                        self.fallback_action = self._h5_load_json(grp, "fallback")
+                        self.executed_actions = self._h5_load_json(grp, "executed") or []
+                        
+                        # Load new state variables
+                        self.recipe_preapproved = grp.attrs.get("recipe_preapproved", False)
+                        self.next_expected_recipe_step_idx = grp.attrs.get("next_expected_recipe_step_idx", 0)
+                        self.deviation_occurred = grp.attrs.get("deviation_occurred", False)
+
+                        self._emit("log", {"message": f"Loaded session '{self.session_hash}' from HDF5."})
+                        return # success -> skip JSON path
+            except Exception as e: # pragma: no cover – catch-all
+                self._emit("error", {"message": f"Failed HDF5 load: {e}"})
+
+        # --- Fallback: JSON file ---
+        if not self.json_path.exists():
+            return
+        try:
+            data = json.loads(self.json_path.read_text())
+            self.conversation_history = data.get("conversation_history", [])
+            self.current_recipe = data.get("current_recipe")
+            self.fallback_action = data.get("fallback_action")
+            self.executed_actions = data.get("executed_actions", [])
+            
+            # Load new state variables from JSON (if present, else defaults)
+            self.recipe_preapproved = data.get("recipe_preapproved", False)
+            self.next_expected_recipe_step_idx = data.get("next_expected_recipe_step_idx", 0)
+            self.deviation_occurred = data.get("deviation_occurred", False)
+
+            self._emit("log", {"message": f"Loaded session '{self.session_hash}' from JSON."})
+        except Exception as e:
+            self._emit("error", {"message": f"Failed to load JSON session: {e}"})
+
+    # end Load / Save session ----------------------------------------------
+    def _save_session(self):
+        """Persist to JSON, then (optionally) HDF5."""
+        payload = {
+            "conversation_history": self.conversation_history,
+            "current_recipe": self.current_recipe,
+            "fallback_action": self.fallback_action,
+            "executed_actions": self.executed_actions,
+            # Save new state variables to JSON
+            "recipe_preapproved": self.recipe_preapproved,
+            "next_expected_recipe_step_idx": self.next_expected_recipe_step_idx,
+            "deviation_occurred": self.deviation_occurred,
+        }
+        # --- JSON backup ---
+        try:
+            self.json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception as e:
+            self._emit("error", {"message": f"Failed to save JSON session: {e}"})
+
+        # --- HDF5 snapshot ---
+        try:
+            with h5py.File(self.hdf5_path, "a") as h5f:
+                grp = h5f.require_group(self.session_hash)
+                grp.attrs["timestamp"] = time.time()
+
+                # Save new state variables as HDF5 attributes for quick access
+                grp.attrs["recipe_preapproved"] = self.recipe_preapproved
+                grp.attrs["next_expected_recipe_step_idx"] = self.next_expected_recipe_step_idx
+                grp.attrs["deviation_occurred"] = self.deviation_occurred
+
+                self._h5_write_json(grp, "memory", self.conversation_history)
+                self._h5_write_json(grp, "recipe", self.current_recipe)
+                self._h5_write_json(grp, "fallback", self.fallback_action)
+                self._h5_write_json(grp, "executed", self.executed_actions)
+        except Exception as e: # pragma: no cover – disk full, permission, etc.
+            self._emit("error", {"message": f"Failed to save HDF5 session: {e}"})
+
+    # Public mutators – call _save_session after changes -------------------
+    def add_to_history(self, role: str, content: str):
+        self.conversation_history.append({"role": role, "content": content})
+        self._save_session()
+
+    def add_executed_action(self, tool_name: str, action: str, result: str):
+        self.executed_actions.append({
+            "tool": tool_name,
+            "action": action,
+            "result": result,
+            "timestamp": str(time.time()),
+        })
+        # If a recipe was pre-approved and no deviation has occurred yet,
+        # increment the expected step index.
+        if self.recipe_preapproved and not self.deviation_occurred:
+            self.next_expected_recipe_step_idx += 1
+        self._save_session()
+
+    def set_plan(self, recipe_steps: List[Dict[str, str]], fallback_action: Optional[Dict[str, str]]):
+        self.current_recipe = recipe_steps
+        self.fallback_action = fallback_action
+        # Reset approval state for a new plan
+        self.recipe_preapproved = False
+        self.next_expected_recipe_step_idx = 0
+        self.deviation_occurred = False
+        self._save_session()
+
+    # New setters for session state
+    def set_recipe_preapproved(self, status: bool):
+        self.recipe_preapproved = status
+        self._save_session()
+
+    def set_deviation_occurred(self, status: bool):
+        self.deviation_occurred = status
+        self._save_session()
+
+    def reset_next_expected_step_idx(self):
+        self.next_expected_recipe_step_idx = 0
+        self._save_session()
+
+    # end Public mutators --------------------------------------------------
+    def get_execution_context(self) -> str:
+        """Generate a context string showing completed actions and the initial recipe."""
+        context_parts: List[str] = []
+
+        if self.executed_actions:
+            context_parts.append("Actions completed so far:")
+            for i, action in enumerate(self.executed_actions, 1):
+                context_parts.append(f"  {i}. {action['tool']}: {action['action']}")
+                if action.get("result"):
+                    result = action["result"]
+                    if len(result) > 200:
+                        result = result[:200] + "…"
+                    context_parts.append(f"     Result: {result}")
+
+        # Add the original recipe only if it exists and hasn't been fully executed or deviated from
+        if self.current_recipe and not self.deviation_occurred: # Only show if not deviated
+            context_parts.append("\nInitial recipe/plan provided to user:")
+            for i, step in enumerate(self.current_recipe, 1):
+                prefix = "  ✅" if i <= self.next_expected_recipe_step_idx else "  " # Mark completed steps
+                context_parts.append(f"{prefix} {i}. {step.get('description', 'No description')}: {step.get('action', 'N/A')} ({step.get('tool', 'N/A')})")
+            if self.fallback_action:
+                context_parts.append(f"\nInitial fallback action provided to user: {self.fallback_action.get('action', 'N/A')} ({self.fallback_action.get('tool', 'N/A')})")
+        elif self.deviation_occurred:
+            context_parts.append("\nNote: Agent deviated from the initial pre-approved recipe. All future actions require individual approval.")
+
+
+        return "\n".join(context_parts) if context_parts else "No prior actions or initial recipe available"

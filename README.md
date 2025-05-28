@@ -123,6 +123,10 @@ Then edit:
 og "show me the diff for bin/script.py at the sixth commit"
 ```
 
+## Why no RAG? No Long-term memory?
+
+Largely because this makes the tool more heavy weight, and for now, this feels about right.
+
 ## 📂 Config Reference (`~/.local/share/og_config.json`)
 
 | Key                    | Description                                                              |
@@ -140,6 +144,12 @@ og "show me the diff for bin/script.py at the sixth commit"
 * Use `make go-run` to run the Go CLI
 * Use `agent --help` to test the Python agent independently
 * NDJSON is used between Go and Python for structured IPC
+
+### Future features:
+
+- working :D
+- move all templates into toml files that are exported to the ~/.local/share/og/ directory so the user can configure them.
+- adjust --verbose to afford granular control of output
 
 ## License
 

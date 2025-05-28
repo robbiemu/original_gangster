@@ -8,14 +8,15 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "rich~=14.0",
+  "h5py~=3.13",
   "litellm~=1.71",
+  "rich~=14.0",
   "smolagents~=1.16",
-  "h5py~=3.13"
+  "tenacity~=9.1"
 ]
 
 [project.scripts]
-agent = "agent.agent:main"
+agent = "agent.main:main"
 
 [tool.setuptools.packages.find]
 include = ["agent"]
