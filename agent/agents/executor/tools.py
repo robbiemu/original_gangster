@@ -18,7 +18,7 @@ def shell_tool(command: str) -> str:
     return result.stdout.strip()
 
 @tool
-def file_tool(path: str) -> str:
+def file_content_tool(path: str) -> str:
     """
     Reads the contents of a file at the given path.
 

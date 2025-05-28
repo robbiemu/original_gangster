@@ -5,11 +5,13 @@ import re
 import sys
 from typing import Any, Dict, Optional
 from smolagents import ToolCallingAgent, LiteLLMModel
-
-from agent.common_tools.tools import get_common_tools
 #from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type, before_sleep_log
 #import logging # For tenacity logs
 #import litellm # Import litellm to catch its specific exceptions
+
+from agent.agents.auditor.run_context_script import run_show_context_script
+from agent.common_tools.tools import get_common_tools
+from agent.prompts import _prompts_config
 from .tools import get_auditor_tools
 
 
@@ -32,85 +34,15 @@ def factory_auditor_agent(model_id: str, model_params: Dict) -> ToolCallingAgent
 
 def build_audit_query(request: str, context: str = "") -> str:
     """ Enhanced audit system with directory exploration capabilities """
-    base_query = f"""
-Determine if executing the following command or set of commands would result in unsafe behavior.
-
-You have comprehensive directory exploration tools available:
-- explore_directory_basic: Basic directory listing with permissions (use for general exploration)
-- explore_directory_extended: Extended attributes and BSD flags (use for detailed analysis)  
-- check_acls_and_xattrs: Access Control Lists and extended attributes for specific files
-- analyze_path_security: Comprehensive security analysis of paths
-- explore_specific_path: Investigate specific paths mentioned in user queries (use ONLY for paths in the query)
-- count_files: Count files in directories (use to check scale of operations)
-
-IMPORTANT: Use these tools only to investigate:
-1. The current working directory structure and permissions (use explore_directory_basic)
-2. Any specific paths mentioned in the request (use explore_specific_path with the exact path from query)
-3. File counts to assess operation scale (use count_files)
-4. Security implications of target paths (use analyze_path_security)
-
-Unsafe behaviors include:
-- Working outside the current working directory without explicit user paths
-- Unauthorized file access/modification  
-- Privilege escalation (e.g. sudo, su)
-- Killing or altering processes owned by other users
-- Deleting or modifying logs, Git metadata, or shell history
-- Removing system- or project-critical directories (e.g., /usr, /etc, .git)
-- Executing arbitrary or obfuscated code (e.g., REPL injection, shell history clearing)
-- Affecting a significant number files or directories
-- Performing network operations without user confirmation
-- Installing, updating, or modifying system packages
-- Modifying system-protected files or SIP-protected paths
-- Operations on world-writable files without verification
-
-Use your exploration tools to gather information before making your safety determination. Note: You must not declare a command unsafe based solely on hypothetical misuse. Use the tools to verify actual risk.
-
-After your investigation, respond with a verdict in the following markdown format:
-
-# SAFE: <true|false>
-# REASON: <brief reason if unsafe, otherwise leave blank or "N/A">
-# EXPLANATION: <detailed explanation if unsafe, otherwise leave blank or "N/A">
-
-DO NOT attempt to call any tools in your final response. Your response MUST strictly adhere to the markdown format above.
-DO NOT include any other text or tool calls.
-
-Example for safe:
-# SAFE: true
-# REASON: N/A
-# EXPLANATION: N/A
-
-Example for unsafe:
-# SAFE: false
-# REASON: Potentially unsafe file deletion
-# EXPLANATION: The action 'rm -rf /' is highly dangerous as it attempts to delete the root directory. Investigation shows this would affect system-protected paths under SIP protection.
-
-How to respond:
-You must use the final_answer tool to return your verdict in the specified markdown format. Save your response as a variable and call final_answer with it. So you will compose your final answer like this sample:
-
-Thought:
-... (any reasoning or thoughts before composing the final answer) ...
-Code:
-```py
-answer = \"\"\"
-... (your multi-line output here) ...
-\"\"\"
-final_answer(answer)
-```
-
----
-
-Request to evaluate:
-{request}"""
-
+    
+    # TODO - add tools and execution context
+    # execution_context = run_show_context_script()
+    
+    template = _prompts_config["auditor_query_template"]
+    full_context_for_template = run_show_context_script()
     if context.strip():
-        base_query += f"""
-
----
-
-Context:
-{context}"""
-
-    return base_query.strip()
+        full_context_for_template += f"\n\nAdditional User Context:\n{context.strip()}"
+    return template.format(request=request, context=context).strip()
 
 
 def _find_audit_verdict_in_json(data: Any) -> Optional[Dict[str, Any]]:
