@@ -9,6 +9,48 @@ import (
 	"github.com/fatih/color"
 )
 
+// LogLevel defines the verbosity level for logging.
+type LogLevel int
+
+const (
+	LogLevelDebug LogLevel = iota // 0 - Most verbose (includes all lower levels)
+	LogLevelInfo                  // 1 - Default operational messages (includes warn, none)
+	LogLevelWarn                  // 2 - Warnings, non-fatal issues (includes none)
+	LogLevelNone                  // 3 - Only critical errors/core interaction messages
+)
+
+// ParseLogLevel converts a string to a LogLevel. Defaults to LogLevelInfo on error.
+func ParseLogLevel(s string) (LogLevel, error) {
+	switch strings.ToLower(s) {
+	case "debug":
+		return LogLevelDebug, nil
+	case "info":
+		return LogLevelInfo, nil
+	case "warn":
+		return LogLevelWarn, nil
+	case "none":
+		return LogLevelNone, nil
+	default:
+		return LogLevelInfo, fmt.Errorf("unknown log level '%s', defaulting to 'info'", s)
+	}
+}
+
+// String returns the string representation of the LogLevel.
+func (l LogLevel) String() string {
+	switch l {
+	case LogLevelDebug:
+		return "debug"
+	case LogLevelInfo:
+		return "info"
+	case LogLevelWarn:
+		return "warn"
+	case LogLevelNone:
+		return "none"
+	default:
+		return fmt.Sprintf("UNKNOWN_LOG_LEVEL(%d)", l)
+	}
+}
+
 // ANSI helpers
 var (
 	green   = color.New(color.FgGreen).SprintFunc()
@@ -20,8 +62,6 @@ var (
 )
 
 // AgentMessage represents the structure of messages from the Python agent.
-// Copied from main.go to avoid circular dependency, consider a shared types package if this grows.
-// For now, let's keep it simple and assume necessary fields are here.
 type AgentMessage struct {
 	Type             string        `json:"type"`
 	Message          string        `json:"message,omitempty"`
@@ -39,6 +79,7 @@ type AgentMessage struct {
 	Reason           string        `json:"reason,omitempty"`
 	Explanation      string        `json:"explanation,omitempty"`
 	Approved         bool          `json:"approved,omitempty"`
+	Location         string        `json:"location,omitempty"`
 }
 
 // AgentAction models a single step in a recipe or fallback.
@@ -52,9 +93,9 @@ type AgentAction struct {
 type UI interface {
 	PrintHelp()
 	PromptForApproval(message string) bool
-	PrintAgentMessage(msg AgentMessage, verbose bool) // Combines display logic
+	PrintAgentMessage(msg AgentMessage, minGoLogLevel LogLevel)
 	PrintColored(c func(a ...interface{}) string, format string, a ...interface{})
-	PrintStderr(line string)
+	PrintStderr(line string, minGoLogLevel LogLevel)
 	// Expose color functions directly for external use
 	Green(a ...interface{}) string
 	Blue(a ...interface{}) string
@@ -80,6 +121,7 @@ Usage:
   og <prompt>             Run OG agent on a prompt (natural language or shell-like)
   og init                 Write default config to ~/.local/share/og/og_config.toml
   og --help, -h           Show this help message
+  og --verbosity <level>  Set log verbosity (debug, info, warn, none)
 
 Examples:
   og "summarize this repo"
@@ -106,16 +148,13 @@ func (c *ConsoleUI) PromptForApproval(message string) bool {
 }
 
 // PrintAgentMessage processes and prints each JSON message from Python.
-func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, verbose bool) {
+func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, minGoLogLevel LogLevel) {
+	// Core messages always print regardless of Go verbosity level
 	switch msg.Type {
-	case "log":
-		if verbose {
-			fmt.Printf("%s %s\n", magenta("[AGENT]"), msg.Message)
-		}
 	case "error":
-		fmt.Printf("%s %s", red("[ERROR]"), msg.Message)
+		fmt.Printf("%s %s\n", red("[ERROR]"), msg.Message)
 	case "unsafe":
-		fmt.Printf("%s %s", red("[UNSAFE]"), msg.Reason)
+		fmt.Printf("%s %s\n", red("[UNSAFE]"), msg.Reason)
 		exp := strings.TrimSpace(msg.Explanation)
 		if exp != "" {
 			fmt.Println(yellow("Explanation:"))
@@ -124,12 +163,9 @@ func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, verbose bool) {
 	case "plan":
 		fmt.Printf("\n%s\n%s %s\n", yellow("🧠 Plan:"), blue("Request:"), msg.Request)
 
-		// Determine if this is a multi-step recipe (has more than one command block or a fallback)
-		// A single-step plan has exactly one recipe step and no fallback.
 		isMultiStepRecipe := len(msg.RecipeSteps) > 1 || msg.FallbackAction != nil
 
 		if isMultiStepRecipe {
-			// This is a multi-step recipe or has a fallback. Request overall recipe approval.
 			fmt.Printf("\n%s\n", blue("Steps:"))
 			for i, s := range msg.RecipeSteps {
 				fmt.Printf("  %s %d. %s\n      %s: %s (%s)\n", cyan("Step"), i+1, s.Description, yellow("Act"), s.Action, s.Tool)
@@ -138,8 +174,6 @@ func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, verbose bool) {
 				fmt.Printf("\n%s %s (%s)\n", yellow("Fallback:"), msg.FallbackAction.Action, msg.FallbackAction.Tool)
 			}
 		} else {
-			// This is a single-step plan. No initial approval prompt.
-			// Just log what the agent plans to do and send the command to Python.
 			fmt.Printf("\n%s\n", blue("Proposed Action:"))
 			s := msg.RecipeSteps[0]
 			fmt.Printf("  %s 1. %s\n      %s: %s (%s)\n", cyan("Action"), s.Description, yellow("Act"), s.Action, s.Tool)
@@ -147,7 +181,6 @@ func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, verbose bool) {
 		}
 
 	case "request_approval":
-		// This case is now ONLY for individual step approvals (triggered by ProxyTool)
 		fmt.Printf("\n%s\n  %s %s\n  %s %s (%s)\n", yellow("🤖 Approval Needed"),
 			cyan("Desc:"), msg.Description,
 			yellow("Cmd:"), msg.Action, msg.Tool)
@@ -159,12 +192,41 @@ func (c *ConsoleUI) PrintAgentMessage(msg AgentMessage, verbose bool) {
 		if trimmed := strings.TrimSpace(msg.Output); trimmed != "" {
 			fmt.Printf("\n%s\n%s\n", green("Output:"), formatOutput(msg.Output))
 		}
+	case "deny_current_action":
+		// This message just signals Go to terminate, Python already handles the user-facing output
+		return
 	default:
-		if msg.Message != "" {
-			fmt.Printf(yellow("Unknown message type: %s\n"), msg.Type)
-			fmt.Println(msg.Message)
-		} else {
-			fmt.Printf(yellow("Unknown message type: %s (no message content)\n"), msg.Type)
+		// Categorized log messages, filtered by minGoLogLevel
+		var msgLevel LogLevel
+		var levelTag string
+		var colorFunc func(a ...interface{}) string
+
+		switch msg.Type {
+		case "debug_log":
+			msgLevel = LogLevelDebug
+			levelTag = "DEBUG"
+			colorFunc = c.Magenta
+		case "info_log":
+			msgLevel = LogLevelInfo
+			levelTag = "INFO"
+			colorFunc = c.Blue
+		case "warn_log":
+			msgLevel = LogLevelWarn
+			levelTag = "WARN"
+			colorFunc = c.Yellow
+		default:
+			// Fallback for unexpected message types or internal prints from Python
+			msgLevel = LogLevelInfo // Default to info if type is not recognized
+			levelTag = "UNKNOWN"
+			colorFunc = c.Yellow
+		}
+
+		if msgLevel >= minGoLogLevel {
+			location := ""
+			if msg.Location != "" {
+				location = fmt.Sprintf(" {%s}", msg.Location)
+			}
+			fmt.Printf("%s%s %s\n", colorFunc(fmt.Sprintf("[%s]", levelTag)), location, msg.Message)
 		}
 	}
 }
@@ -198,8 +260,10 @@ func (c *ConsoleUI) PrintColored(colorFunc func(a ...interface{}) string, format
 }
 
 // PrintStderr prints messages from the Python agent's stderr stream.
-func (c *ConsoleUI) PrintStderr(line string) {
-	fmt.Fprintln(os.Stderr, magenta("[PY STDERR]"), line)
+func (c *ConsoleUI) PrintStderr(line string, minGoLogLevel LogLevel) {
+	if minGoLogLevel <= LogLevelDebug { // Only print stderr at debug level
+		fmt.Fprintln(os.Stderr, magenta("[PY STDERR]"), line)
+	}
 }
 
 // Expose color functions

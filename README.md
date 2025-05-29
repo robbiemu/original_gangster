@@ -2,6 +2,16 @@
 
 OG is a powerful command-line interface (CLI) tool designed to empower users with an automated AI agent for various tasks on their local machine. It orchestrates a multi-agent system (Planner, Executor, Auditor) to achieve user-defined prompts, prioritizing safety and user control through robust auditing and explicit approval mechanisms.
 
+## 💡 Usage
+
+Run OG with a natural language prompt or a shell-like query:
+
+```bash
+og "summarize this repo"
+og "generate a gitignore for Rust"
+og "list files modified in last commit"
+og "write a python script that prints 'hello world'"
+
 ## ✨ Key Features
 
 *   **Multi-Agent Orchestration:** Utilizes a Planner agent to break down tasks into actionable steps, an Executor agent to perform those steps using a suite of tools, and a vigilant Auditor agent for continuous safety checks.
@@ -64,105 +74,4 @@ OG is a powerful command-line interface (CLI) tool designed to empower users wit
     python_agent_path = "/Users/youruser/original_gangster/agent/main.py"
     # ... other settings ...
     ```
-    Adjust model IDs and parameters (`managed_agent`, `auditor_agent`) if you're using different LLMs or API endpoints.
-
-    The `output_threshold_bytes` setting (default 16KB) controls when large tool outputs are saved to a temporary file instead of being printed directly to the terminal.
-
-## 💡 Usage
-
-Run OG with a natural language prompt or a shell-like query:
-
-```bash
-og "summarize this repo"
-og "generate a gitignore for Rust"
-og "list files modified in last commit"
-og "write a python script that prints 'hello world'"
-```
-
-### Command-line Options
-
-*   `og <prompt>`: Runs the OG agent with the specified prompt.
-*   `og init`: Writes default configuration files and prompts.
-*   `og --help` or `og -h`: Shows help message.
-*   `og --verbose`: Enables verbose logging from the Go client and Python agent.
-
-## ⚙️ Configuration
-
-OG uses two primary configuration files:
-
-1.  **`~/.local/share/og/og_config.toml`**:
-    *   `managed_agent`: Configuration for the main Planner/Executor agent (model, parameters).
-    *   `auditor_agent`: Configuration for the Auditor agent (model, parameters).
-    *   `general`: General settings like `python_agent_path`, `summary_mode`, `verbose_agent`, `session_timeout_minutes`, and `output_threshold_bytes`.
-    *   This file is created by `og init`.
-
-2.  **`~/.local/share/og/prompts/prompts.toml`**:
-    *   Contains the core prompts used by the Planner and Executor agents.
-    *   You can modify these prompts to customize the agent's behavior and tone.
-    *   This file is also created by `og init`.
-
-## 🤝 How It Works (High-Level Flow)
-
-1.  **Go CLI Launch:** The Go CLI application (`og`) receives the user's query and initializes a unique session hash.
-2.  **Python Agent Startup:** The Go CLI launches the Python agent (`agent/main.py`) as a subprocess, passing configuration, the session hash, the query, and the current working directory.
-3.  **Initial Planning (Python):**
-    *   The Python `AgentOrchestrator` checks if a session exists for the given hash. If not (new session), it invokes the **Planner Agent**.
-    *   The Planner Agent generates a detailed multi-step "recipe" (plan) to address the user's query. This recipe consists of a sequence of `(description, action, tool)` triplets.
-    *   The `AgentOrchestrator` then takes the *first action* from this generated recipe and sends it to the **Auditor Agent** for an initial safety check.
-4.  **Initial Plan Approval (Go):**
-    *   The Python agent sends the initial plan (recipe steps, optional fallback) and the audit result to the Go CLI via a JSON stream.
-    *   The Go CLI displays the comprehensive plan to the user.
-    *   **If the recipe has multiple steps or a fallback action**, the Go CLI prompts the user for overall recipe approval: "Proceed with recipe? [y/N]".
-    *   **If the recipe is a single step (no fallback)**, the Go CLI auto-proceeds to the execution phase, as individual action approval will be handled by the Python agent.
-    *   If the initial audit by the Auditor agent deems the first action unsafe, the Go CLI immediately flags it as "UNSAFE" and terminates the session.
-5.  **Execution Loop (Python & Go Interaction):**
-    *   Upon approval (or auto-proceed for single-step plans), the Go CLI sends an `execute_recipe` (or `execute_single_action`) command back to the Python agent.
-    *   The Python `AgentOrchestrator` then directs the **Executor Agent** to begin executing the plan.
-    *   **Per-Action Logic (within `ProxyTool`):**
-        *   Whenever the Executor Agent attempts to call a "dangerous" tool (currently `shell_tool` or `file_content_tool`), the `ProxyTool` intercepts the call.
-        *   **Audit:** The `ProxyTool` first sends the *specific action* (e.g., `rm -rf /`) to the **Auditor Agent** for a real-time security assessment.
-        *   **Safety Check & Deviation:**
-            *   If the Auditor deems the action `unsafe`, the `ProxyTool` immediately halts execution, emits an "unsafe" message to Go, and signals termination.
-            *   If safe, the `ProxyTool` then checks if this action matches the currently *expected* action in the pre-approved recipe (if the recipe was pre-approved and no deviation has occurred).
-            *   **Auto-Approval:** If the action is safe and matches an expected step in a pre-approved recipe *without deviation*, the `ProxyTool` auto-executes the tool.
-            *   **User Approval Prompt:** If the action is safe but *not* an expected step in a pre-approved recipe (i.e., a deviation has occurred), or if it's part of a single-step plan (which requires individual approval), the `ProxyTool` sends a "request_approval" message to the Go CLI.
-        *   **Go User Interaction:** The Go CLI displays the action and prompts the user for "Execute step? [y/N]". It then sends the user's "y/N" response back to Python.
-        *   **Execution/Denial:** Based on the user's response, the `ProxyTool` either executes the underlying command or denies it, leading to session termination if denied.
-    *   **Output & Progress:** As tools are executed, their outputs and results are captured by the `ProxyTool`, formatted, and sent back to the Go CLI for display to the user.
-    *   **Session State Update:** The `AgentSession` object in Python continuously saves the updated state (executed actions, progress within the recipe, deviation status) to the HDF5 file.
-6.  **Session End:** The session continues until the agent successfully completes the task, encounters an unrecoverable error, or is explicitly denied by the user at an approval step. A final summary is provided.
-
-## 🕵️ Agent Roles
-
-*   **Planner Agent:** (Housed in `agent/agents/planner/`)
-    *   **Function:** Responsible for taking the initial user query and breaking it down into a logical, executable sequence of steps, forming the "recipe." It considers available tools and context to devise a strategy.
-    *   **Tools:** Primarily uses `common_tools` to gather information for planning.
-*   **Executor Agent:** (Housed in `agent/agents/executor/`)
-    *   **Function:** Executes the individual actions defined in the recipe. It's the "doer" agent.
-    *   **Tools:** Uses `shell_tool` for running shell commands and `file_content_tool` for reading file contents. These tools are wrapped by `ProxyTool` for auditing and approval. Also uses `common_tools`.
-*   **Auditor Agent:** (Housed in `agent/agents/auditor/`)
-    *   **Function:** The "conscience" of the system. It critically evaluates proposed actions for potential security risks, unintended side effects, or deviations from safe practices. It's invoked both for the first action of the initial plan and for *every* subsequent `shell_tool` or `file_content_tool` execution.
-    *   **Tools:** Utilizes specialized tools like `count_files`, `explore_directory_basic`, `explore_directory_extended`, `check_acls_and_xattrs`, `analyze_path_security`, and `explore_specific_path` to gather detailed system information and assess risks. It also runs a `show_context.sh` script to get current user/system context for its evaluations.
-
-## 🔐 Auditing and Safety
-
-OG's primary differentiator is its robust focus on safety. The Auditor agent, equipped with various file system and system security probing tools, acts as a critical gatekeeper.
-
-*   **Pre-execution Audit:** Before any `shell_tool` or `file_content_tool` command is executed, the Auditor independently assesses its safety based on the current system context and known security best practices.
-*   **Deviation Detection:** The system actively tracks if the agent is executing actions that deviate from the pre-approved recipe. If a deviation is detected, the auto-approval mechanism is bypassed, and explicit user approval is requested for that specific action, even if the overall recipe was initially pre-approved.
-*   **Contextual Awareness:** The Auditor uses a context script (`show_context.sh`) to understand the current user, group, SIP status, and directory ownership, enabling more informed safety decisions.
-
-This multi-layered approach ensures that the user retains ultimate control over their system, even when delegating complex tasks to the AI agent.
-
-## 💾 Session Management & Persistence
-
-OG uses a robust session management system to maintain context across agent turns and even application restarts.
-
-*   **HDF5 Storage:** The primary storage for session data (conversation history, current recipe, executed actions, original query, and approval flags) is an HDF5 file (`~/.local/share/og/agent_states.h5`). This allows for efficient storage and retrieval of complex data structures.
-*   **JSON Fallback:** A JSON file (`~/.local/share/og/<session_hash>.json`) serves as a backup, ensuring some level of persistence even if HDF5 operations encounter issues.
-*   **Automatic Resume:** If you run `og` with the same session hash (e.g., from a previous crash or planned exit), the agent will automatically load the last saved state and attempt to resume from where it left off, guiding the Executor based on the persisted recipe and executed actions.
-*   **Tracking Progress and Deviations:** The session state meticulously tracks:
-    *   `is_single_step_plan`: Whether the initial plan was a single action or a multi-step recipe.
-    *   `recipe_preapproved`: If the user initially approved the entire multi-step recipe.
-    *   `next_expected_recipe_step_idx`, `next_expected_subcommand_idx`: The exact point within the recipe the agent is expected to be.
-    *   `deviation_occurred`: A crucial flag that, once set (e.g., agent tries an unapproved action, or fails an expected step), forces individual user approval for *all* subsequent actions, regardless of prior recipe pre-approval. This ensures safety if the agent goes "off-script."
+    Adjust model IDs and parameters for `default_agent`, `executor_agent`, `planner_agent`, and `auditor_agent` if you're using different LLMs or API endpoints.

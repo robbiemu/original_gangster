@@ -1,8 +1,11 @@
 from importlib import resources
 import subprocess
 
+
 def run_show_context_script():
-    script_content = resources.files("agent.scripts").joinpath("show_context.sh").read_text()
+    script_content = (
+        resources.files("agent.scripts").joinpath("show_context.sh").read_text()
+    )
     result = subprocess.run(
         ["bash", "-s"],
         input=script_content,

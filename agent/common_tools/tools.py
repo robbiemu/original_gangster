@@ -19,9 +19,13 @@ def man_page(name: str) -> Optional[str]:
     """
 
     try:
-        raw = subprocess.check_output(["man", name], text=True, stderr=subprocess.STDOUT)
-        return subprocess.run(["col", "-bx"], input=raw, text=True, capture_output=True).stdout
-    except Exception: 
+        raw = subprocess.check_output(
+            ["man", name], text=True, stderr=subprocess.STDOUT
+        )
+        return subprocess.run(
+            ["col", "-bx"], input=raw, text=True, capture_output=True
+        ).stdout
+    except Exception:
         return f"--No result for '{name}'--"
 
 
@@ -38,42 +42,44 @@ def info_page(name: str) -> Optional[str]:
         name: The name of the info page to retrieve (e.g., "coreutils", "bash").
     """
 
-    try: 
-        return subprocess.check_output(["info", name], text=True, stderr=subprocess.STDOUT)
-    except Exception: 
+    try:
+        return subprocess.check_output(
+            ["info", name], text=True, stderr=subprocess.STDOUT
+        )
+    except Exception:
         return f"--No result for '{name}'--"
 
 
 @tool
 def tldr_page(name: str) -> Optional[str]:
     """Local TLDR examples.
-    Examples: 
+    Examples:
     - print(tldr_page("lsof"))
     - print(tldr_page("npm install"))
-    
+
     Args:
         name: The command for which to retrieve TLDR examples (e.g., "tar", "git").
     """
 
     for cmd in (["tlrc", "--no-color", "--quiet", name], ["tldr", "-q", name]):
         if shutil.which(cmd[0]):
-            try: 
+            try:
                 return subprocess.check_output(cmd, text=True)
-            except subprocess.CalledProcessError: 
+            except subprocess.CalledProcessError:
                 return f"--No result for '{name}'--"
     return None
 
 
 @tool
 def help_flag(command: str, with_col_bx: bool = False) -> Optional[str]:
-    """Output from the `<command> --help` if available.    
+    """Output from the `<command> --help` if available.
     Supports both simple commands and commands with subcommands/parameters.
     Optionally pipes the output through `col -bx` for plaintext formatting.
 
-    Examples: 
+    Examples:
     - print(help_flag("grep"))
     - print(help_flag("docker build", with_col_bx=True))
-    
+
     Args:
         command: The command (with optional subcommands) for which to retrieve help output.
         with_col_bx: If True, pipe the output through `col -bx` to remove backspaces and other formatting.
@@ -83,51 +89,50 @@ def help_flag(command: str, with_col_bx: bool = False) -> Optional[str]:
         return None
 
     raw_output: Optional[str] = None
-    
+
     # Try with --help first
     try:
-        raw_output = subprocess.check_output(cmd_parts + ["--help"], 
-                                       text=True, 
-                                       stderr=subprocess.STDOUT,
-                                       timeout=10)
+        raw_output = subprocess.check_output(
+            cmd_parts + ["--help"], text=True, stderr=subprocess.STDOUT, timeout=10
+        )
     except subprocess.CalledProcessError:
         # Some commands use -h instead of --help
         try:
-            raw_output = subprocess.check_output(cmd_parts + ["-h"], 
-                                           text=True, 
-                                           stderr=subprocess.STDOUT,
-                                           timeout=10)
+            raw_output = subprocess.check_output(
+                cmd_parts + ["-h"], text=True, stderr=subprocess.STDOUT, timeout=10
+            )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass # Keep raw_output as None to try other methods or return None
+            pass  # Keep raw_output as None to try other methods or return None
     except subprocess.TimeoutExpired:
         return "Command timed out."
     except Exception:
-        pass # Keep raw_output as None
+        pass  # Keep raw_output as None
 
     # Try help subcommand for some tools (like git help status) if direct flags failed
     if raw_output is None:
         try:
             if len(cmd_parts) > 1:
                 help_cmd = [cmd_parts[0], "help"] + cmd_parts[1:]
-                raw_output = subprocess.check_output(help_cmd, 
-                                               text=True, 
-                                               stderr=subprocess.STDOUT,
-                                               timeout=10)
+                raw_output = subprocess.check_output(
+                    help_cmd, text=True, stderr=subprocess.STDOUT, timeout=10
+                )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, Exception):
-            pass # Keep raw_output as None
+            pass  # Keep raw_output as None
 
     if raw_output is None:
-        return None # No help found after all attempts
+        return None  # No help found after all attempts
 
     if with_col_bx:
         try:
-            return subprocess.run(["col", "-bx"], input=raw_output, text=True, capture_output=True).stdout
+            return subprocess.run(
+                ["col", "-bx"], input=raw_output, text=True, capture_output=True
+            ).stdout
         except Exception:
             # Fallback to raw output if col -bx fails for any reason
             return raw_output
-    
+
     return raw_output
-    
+
 
 @tool
 def probe(name: str) -> Optional[str]:
@@ -144,10 +149,12 @@ def probe(name: str) -> Optional[str]:
     abs_path = os.path.realpath(path)
     directory = os.path.dirname(abs_path)
     try:
-        file_output = subprocess.check_output(['file', '--brief', '--mime', abs_path], text=True).strip()
+        file_output = subprocess.check_output(
+            ["file", "--brief", "--mime", abs_path], text=True
+        ).strip()
     except subprocess.CalledProcessError:
         file_output = "Unknown file type"
-    is_binary = 'charset=binary' in file_output
+    is_binary = "charset=binary" in file_output
     return (
         f"Command: {name}\n"
         f"Full Path: {abs_path}\n"
@@ -166,11 +173,11 @@ def brew_info(name: str) -> Optional[str]:
         name: The name of the Homebrew package (e.g., "git", "node").
     """
 
-    try: 
+    try:
         return subprocess.check_output(["brew", "info", name], text=True)
-    except Exception: 
+    except Exception:
         return f"--No result for '{name}'--"
-    
+
 
 def get_common_tools():
     """
@@ -202,6 +209,6 @@ def check_planner_tool_availability() -> Dict[str, bool]:
     availability = {
         "info_page": bool(shutil.which("info")),
         "tldr_page": bool(shutil.which("tlrc") or shutil.which("tldr")),
-        "brew_info": bool(shutil.which("brew"))
+        "brew_info": bool(shutil.which("brew")),
     }
     return availability

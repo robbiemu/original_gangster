@@ -21,7 +21,7 @@ func main() {
 
 	helpFlag := flag.Bool("help", false, "show help message")
 	hFlag := flag.Bool("h", false, "show help message (shorthand)")
-	verboseFlag := flag.Bool("verbose", false, "run in verbose mode")
+	verbosityStr := flag.String("verbosity", "warn", "set log verbosity level (debug, info, warn, none)")
 
 	// Set the custom help function to use the UI component
 	flag.Usage = consoleUI.PrintHelp
@@ -63,9 +63,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Override config verbose setting if CLI flag is present
-	if *verboseFlag {
-		cfg.General.VerboseAgent = true
+	// Override config verbosity setting if CLI flag is present
+	parsedVerbosityLevel, err := ui.ParseLogLevel(*verbosityStr)
+	if err != nil {
+		consoleUI.PrintColored(consoleUI.Yellow, "%s\n", err.Error())
+		// Continue with default from config if parsing fails, or 'info' if config also failed.
+	} else {
+		cfg.General.VerbosityLevel = parsedVerbosityLevel
 	}
 
 	// Check if a query was provided
@@ -77,7 +81,7 @@ func main() {
 	query := strings.Join(args, " ")
 
 	// Create and run the session
-	s := session.NewSession(cfg, consoleUI)
+	s := session.NewSession(cfg, consoleUI, cfg.Cache)
 	if err := s.Run(query); err != nil {
 		consoleUI.PrintColored(consoleUI.Red, "OG session failed: %v\n", err)
 		os.Exit(1)

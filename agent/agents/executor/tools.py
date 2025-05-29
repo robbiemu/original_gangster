@@ -1,4 +1,4 @@
-import subprocess # Correct import for synchronous subprocess.run
+import subprocess
 from pathlib import Path
 from smolagents.tools import tool
 
@@ -22,8 +22,8 @@ def shell_tool(command: str) -> str:
         shell=True,
         capture_output=True,
         text=True,
-        check=False # Do not raise CalledProcessError on non-zero exit codes,
-                    # instead capture and report the returncode.
+        check=False,  # Do not raise CalledProcessError on non-zero exit codes,
+        # instead capture and report the returncode.
     )
 
     combined_output_parts = []
@@ -41,7 +41,9 @@ def shell_tool(command: str) -> str:
 
     # Add exit code if it's not 0
     if result.returncode != 0:
-        combined_output_parts.append(f"--- Command exited with status: {result.returncode} ---")
+        combined_output_parts.append(
+            f"--- Command exited with status: {result.returncode} ---"
+        )
 
     # If no output at all (neither stdout, stderr, nor non-zero exit code indicator)
     if not combined_output_parts:

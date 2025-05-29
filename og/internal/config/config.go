@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/robbiemu/original_gangster/og/internal/ui"
 )
 
 // Configuration structs
@@ -19,22 +20,32 @@ type ModelCfg struct {
 type GeneralCfg struct {
 	PythonAgentPath      string `toml:"python_agent_path"`
 	SummaryMode          bool   `toml:"summary_mode"`
-	VerboseAgent         bool   `toml:"verbose_agent"`
-	SessionTimeout       int    `toml:"session_timeout_minutes"`
-	OutputThresholdBytes int    `toml:"output_threshold_bytes"`
+	VerbosityLevelStr    string `toml:"verbosity_level"`
+	VerbosityLevel       ui.LogLevel
+	SessionTimeout       int `toml:"session_timeout_minutes"`
+	OutputThresholdBytes int `toml:"output_threshold_bytes"`
+}
+
+type CacheCfg struct {
+	JSONLogs   bool   `toml:"json_logs"`
+	Directory  string `toml:"directory"`  // Relative to data_dir, or empty for data_dir itself
+	Expiration int    `toml:"expiration"` // Days, 0 means no expiration
 }
 
 type OGConfig struct {
-	ManagedAgent ModelCfg   `toml:"managed_agent"`
-	AuditorAgent ModelCfg   `toml:"auditor_agent"`
-	General      GeneralCfg `toml:"general"`
+	DefaultAgent  ModelCfg   `toml:"default_agent"`
+	ExecutorAgent ModelCfg   `toml:"executor_agent"`
+	PlannerAgent  ModelCfg   `toml:"planner_agent"`
+	AuditorAgent  ModelCfg   `toml:"auditor_agent"`
+	General       GeneralCfg `toml:"general"`
+	Cache         CacheCfg   `toml:"cache"`
 }
 
 const configFileName = "og_config.toml"
 const defaultPromptsFileName = "prompts.toml"
 
-// getDataDir returns the base data directory for OG.
-func getDataDir() (string, error) {
+// GetDataDir returns the base data directory for OG.
+func GetDataDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -44,7 +55,7 @@ func getDataDir() (string, error) {
 
 // GetConfigPath returns the full path to the main configuration file.
 func GetConfigPath() (string, error) {
-	dir, err := getDataDir()
+	dir, err := GetDataDir()
 	if err != nil {
 		return "", err
 	}
@@ -53,7 +64,7 @@ func GetConfigPath() (string, error) {
 
 // GetPromptsDir returns the full path to the prompts directory.
 func GetPromptsDir() (string, error) {
-	dir, err := getDataDir()
+	dir, err := GetDataDir()
 	if err != nil {
 		return "", err
 	}
@@ -68,25 +79,39 @@ func SaveDefaultConfig(path string, embeddedPromptsFS embed.FS) error {
 	}
 
 	defaults := OGConfig{
-		ManagedAgent: ModelCfg{
-			Model: "ollama/llama3:latest",
+		DefaultAgent: ModelCfg{
+			Model: "ollama/gemma3:12b-it-qat",
 			Params: map[string]interface{}{
-				"base_url": "http://localhost:11435",
+				"base_url": "http://localhost:11434",
 			},
 		},
-		AuditorAgent: ModelCfg{
-			Model: "ollama/gemma3:27b-it",
+		ExecutorAgent: ModelCfg{
+			// These will inherit from DefaultAgent unless specified
+			// Model: "ollama/llama3:latest",
+			// Params: map[string]interface{}{},
+		},
+		PlannerAgent: ModelCfg{
+			// These will inherit from DefaultAgent unless specified
+			// Model: "ollama/llama3:latest",
+			// Params: map[string]interface{}{},
+		},
+		AuditorAgent: ModelCfg{ // We have a specific, lower temperature, default for this one
 			Params: map[string]interface{}{
-				"base_url":    "http://localhost:11435",
 				"temperature": 0.2,
 			},
 		},
 		General: GeneralCfg{
 			PythonAgentPath:      "~/.local/share/og/agent.py",
 			SummaryMode:          true,
-			VerboseAgent:         false,
+			VerbosityLevelStr:    ui.LogLevelInfo.String(),
 			SessionTimeout:       30,
-			OutputThresholdBytes: 16768, // 16 * 1024 bytes
+			OutputThresholdBytes: 4096,
+		},
+
+		Cache: CacheCfg{
+			JSONLogs:   true,
+			Directory:  "", // Default to base data dir (~/.local/share/og/)
+			Expiration: 0,  // No expiration by default
 		},
 	}
 
@@ -135,9 +160,14 @@ func LoadConfig() (*OGConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Apply defaults where specific agent configs are missing
+	applyDefaultModelConfig(&cfg.ExecutorAgent, cfg.DefaultAgent)
+	applyDefaultModelConfig(&cfg.PlannerAgent, cfg.DefaultAgent)
+	applyDefaultModelConfig(&cfg.AuditorAgent, cfg.DefaultAgent)
+
 	expandPath := func(p string) string {
 		if strings.HasPrefix(p, "~/") {
-			home, _ := os.UserHomeDir() // Error ignored as this is a utility func, main will catch if critical
+			home, _ := os.UserHomeDir()
 			return filepath.Join(home, p[2:])
 		}
 		return p
@@ -149,5 +179,54 @@ func LoadConfig() (*OGConfig, error) {
 		cfg.General.OutputThresholdBytes = 131072 // 128KB
 	}
 
+	// Parse VerbosityLevel from string after unmarshaling
+	parsedLevel, err := ui.ParseLogLevel(cfg.General.VerbosityLevelStr)
+	if err != nil {
+		// If parsing fails (e.g., invalid string in TOML or empty string if not present),
+		// log a warning and default to LogLevelInfo.
+		// This covers cases where 'verbosity_level' is missing or malformed in the TOML.
+		fmt.Fprintf(os.Stderr, "Warning: %v. Defaulting verbosity to 'info'.\n", err)
+		cfg.General.VerbosityLevel = ui.LogLevelInfo
+	} else {
+		cfg.General.VerbosityLevel = parsedLevel
+	}
+
+	// Apply defaults and resolve path for CacheCfg
+	// If Cache.Directory is empty in TOML, it defaults to "" by unmarshaling.
+	// In this case, we want it to resolve to the base data directory.
+	// Otherwise, it's a subdirectory relative to the base data directory.
+	baseDataDir, err := GetDataDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get base data directory for cache path resolution: %w", err)
+	}
+
+	if cfg.Cache.Directory != "" {
+		cfg.Cache.Directory = expandPath(cfg.Cache.Directory) // Expand potential ~/
+		cfg.Cache.Directory = filepath.Join(baseDataDir, cfg.Cache.Directory)
+	} else {
+		cfg.Cache.Directory = baseDataDir // If unset, default to base data dir
+	}
+
 	return &cfg, nil
+}
+
+// applyDefaultModelConfig applies default model and params if target is missing them.
+// If target params exist, they are merged with defaults, with target params taking precedence.
+func applyDefaultModelConfig(target *ModelCfg, defaults ModelCfg) {
+	if target.Model == "" {
+		target.Model = defaults.Model
+	}
+	if len(target.Params) == 0 {
+		target.Params = defaults.Params
+	} else {
+		// Merge params: target params override default params
+		mergedParams := make(map[string]interface{})
+		for k, v := range defaults.Params {
+			mergedParams[k] = v
+		}
+		for k, v := range target.Params {
+			mergedParams[k] = v
+		}
+		target.Params = mergedParams
+	}
 }

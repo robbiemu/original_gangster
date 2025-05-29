@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robbiemu/original_gangster/og/internal/config" // Import the config package
-	"github.com/robbiemu/original_gangster/og/internal/ui"     // Import the ui package
+	"github.com/robbiemu/original_gangster/og/internal/config"
+	"github.com/robbiemu/original_gangster/og/internal/ui"
 )
 
 // AgentProcessManager manages the Python agent's process.
@@ -24,20 +24,23 @@ type ProcessManager struct {
 	stderrScanner *bufio.Scanner
 	mu            sync.Mutex
 	ui            ui.UI // Dependency injection for UI
+	minGoLogLevel ui.LogLevel
 }
 
 // NewProcessManager creates a new ProcessManager.
-func NewProcessManager(ui ui.UI) *ProcessManager {
-	return &ProcessManager{ui: ui}
+func NewProcessManager(ui ui.UI, minGoLogLevel ui.LogLevel) *ProcessManager {
+	return &ProcessManager{ui: ui, minGoLogLevel: minGoLogLevel}
 }
 
 // Start initiates the Python agent process.
-func (pm *ProcessManager) Start(cfg *config.OGConfig, sessionHash, query, workdir string) error {
+func (pm *ProcessManager) Start(cfg *config.OGConfig, sessionHash, query, workdir string, jsonLogsEnabled bool, cacheDirPath string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	mParams, _ := json.Marshal(cfg.ManagedAgent.Params)
-	aParams, _ := json.Marshal(cfg.AuditorAgent.Params)
+	// Marshal parameters for each agent
+	executorParams, _ := json.Marshal(cfg.ExecutorAgent.Params)
+	plannerParams, _ := json.Marshal(cfg.PlannerAgent.Params)
+	auditorParams, _ := json.Marshal(cfg.AuditorAgent.Params)
 
 	pythonAgentFilePath := cfg.General.PythonAgentPath
 
@@ -58,16 +61,20 @@ func (pm *ProcessManager) Start(cfg *config.OGConfig, sessionHash, query, workdi
 		"--session-hash", sessionHash,
 		"--query", query,
 		"--workdir", workdir,
-		"--model", cfg.ManagedAgent.Model,
-		"--model-params", string(mParams),
+		// Pass models and params for each agent
+		"--executor-model", cfg.ExecutorAgent.Model,
+		"--executor-params", string(executorParams),
+		"--planner-model", cfg.PlannerAgent.Model,
+		"--planner-params", string(plannerParams),
 		"--auditor-model", cfg.AuditorAgent.Model,
-		"--auditor-params", string(aParams),
+		"--auditor-params", string(auditorParams),
 		"--output-threshold-bytes", fmt.Sprintf("%d", cfg.General.OutputThresholdBytes),
+		"--json-logs-enabled", fmt.Sprintf("%t", jsonLogsEnabled),
+		"--cache-directory", cacheDirPath,
 	}
 
-	if cfg.General.VerboseAgent {
-		cmdArgs = append(cmdArgs, "--verbose")
-	}
+	cmdArgs = append(cmdArgs, "--verbosity", cfg.General.VerbosityLevel.String())
+
 	if cfg.General.SummaryMode {
 		cmdArgs = append(cmdArgs, "--summary-mode")
 	}
@@ -112,7 +119,7 @@ func (pm *ProcessManager) Start(cfg *config.OGConfig, sessionHash, query, workdi
 	pm.stderrScanner = bufio.NewScanner(stderr)
 	go func() {
 		for pm.stderrScanner.Scan() {
-			pm.ui.PrintStderr(pm.stderrScanner.Text())
+			pm.ui.PrintStderr(pm.stderrScanner.Text(), pm.minGoLogLevel)
 		}
 	}()
 

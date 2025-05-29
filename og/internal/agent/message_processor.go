@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/robbiemu/original_gangster/og/internal/ui"
@@ -13,15 +14,15 @@ import (
 type MessageProcessor struct {
 	processManager *ProcessManager
 	ui             ui.UI
-	verbose        bool // Retain verbose flag from config for logging decisions
+	minGoLogLevel  ui.LogLevel
 }
 
 // NewMessageProcessor creates a new MessageProcessor.
-func NewMessageProcessor(pm *ProcessManager, ui ui.UI, verbose bool) *MessageProcessor {
+func NewMessageProcessor(pm *ProcessManager, ui ui.UI, minGoLogLevel ui.LogLevel) *MessageProcessor {
 	return &MessageProcessor{
 		processManager: pm,
 		ui:             ui,
-		verbose:        verbose,
+		minGoLogLevel:  minGoLogLevel,
 	}
 }
 
@@ -34,10 +35,13 @@ func (mp *MessageProcessor) ProcessMessages() error {
 		if line == "" {
 			continue
 		}
-		var msg ui.AgentMessage // Use ui.AgentMessage
+		var msg ui.AgentMessage
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			// Raw output or non-JSON log from Python. Print as-is.
-			fmt.Println(line)
+			// Raw output or non-JSON log from Python (e.g., Python's internal prints)
+			// Only print if Go's verbosity is set to debug or lower
+			if mp.minGoLogLevel <= ui.LogLevelDebug {
+				fmt.Fprintln(os.Stderr, line)
+			}
 			continue
 		}
 
@@ -58,7 +62,7 @@ func (mp *MessageProcessor) ProcessMessages() error {
 // HandleMessage processes a single AgentMessage from Python.
 // Returns true if the session should continue, false if it should terminate.
 func (mp *MessageProcessor) HandleMessage(msg ui.AgentMessage) (bool, error) {
-	mp.ui.PrintAgentMessage(msg, mp.verbose) // Delegate display to UI
+	mp.ui.PrintAgentMessage(msg, mp.minGoLogLevel) // Delegate display to UI
 
 	switch msg.Type {
 	case "error":

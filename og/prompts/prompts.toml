@@ -19,7 +19,7 @@ Before you write your final answer, you may use the following tools to gather in
 Planning tools: (unavailable to the executor in execution phase)
 {planning_tools_section_str}
 
-These planning tools are only available to you during planning, and may not be used in an Act: statement. You can use them in a code block and wait to see the output before producing your final answer. Examples:
+These planning tools are only available to you during planning, and may not be used in an Act: statement. You can use them in a code block and wait to see the output before producing your final answer.
 
 Request: {query}
 """

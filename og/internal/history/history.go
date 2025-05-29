@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/robbiemu/original_gangster/og/internal/config"
 )
 
 // HistoryRecord defines the structure for a single history entry.
@@ -17,19 +19,9 @@ type HistoryRecord struct {
 	Query string `json:"query"`
 }
 
-// getDataDir returns the base data directory for OG.
-// Duplicated from config for now to avoid circular dependency, consider a shared 'paths' package if needed.
-func getDataDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".local", "share", "og"), nil
-}
-
 // GetHistoryPath returns the full path to the history file.
 func GetHistoryPath() (string, error) {
-	dir, err := getDataDir()
+	dir, err := config.GetDataDir()
 	if err != nil {
 		return "", err
 	}

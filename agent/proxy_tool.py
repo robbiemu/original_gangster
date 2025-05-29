@@ -9,7 +9,9 @@ def _default_before_hook(proxy_instance: "ProxyTool", *args, **kwargs) -> None:
     pass
 
 
-def _default_around_hook(proxy_instance: "ProxyTool", proceed_callable: Callable, *args, **kwargs) -> Any:
+def _default_around_hook(
+    proxy_instance: "ProxyTool", proceed_callable: Callable, *args, **kwargs
+) -> Any:
     """
     Default 'around' hook: simply calls the underlying tool's execution.
     :param proxy_instance: The ProxyTool instance itself.
@@ -18,7 +20,13 @@ def _default_around_hook(proxy_instance: "ProxyTool", proceed_callable: Callable
     return proceed_callable(*args, **kwargs)
 
 
-def _default_after_hook(proxy_instance: "ProxyTool", result: Any, exception: Optional[Exception], *args, **kwargs) -> None:
+def _default_after_hook(
+    proxy_instance: "ProxyTool",
+    result: Any,
+    exception: Optional[Exception],
+    *args,
+    **kwargs,
+) -> None:
     """Default 'after' hook: performs no action."""
     pass
 
@@ -32,13 +40,15 @@ class ProxyTool(Tool):
     All hooks are synchronous functions to maintain compatibility with smolagents framework.
     """
 
-    def __init__(self,
-                 name: str,
-                 underlying: Tool,
-                 description: str = None,
-                 before_hook: Optional[Callable] = None,
-                 around_hook: Optional[Callable] = None,
-                 after_hook: Optional[Callable] = None):
+    def __init__(
+        self,
+        name: str,
+        underlying: Tool,
+        description: str = None,
+        before_hook: Optional[Callable] = None,
+        around_hook: Optional[Callable] = None,
+        after_hook: Optional[Callable] = None,
+    ):
         """
         Initializes the ProxyTool.
 
@@ -67,17 +77,29 @@ class ProxyTool(Tool):
         underlying_description = getattr(underlying, "description", None)
         if not underlying_description:
             doc = getattr(underlying, "__doc__", "")
-            underlying_description = doc.strip().split("\n")[0] if doc else "an unspecified action"
+            underlying_description = (
+                doc.strip().split("\n")[0] if doc else "an unspecified action"
+            )
 
         # Use provided description or fall back to a generic one
-        self.description = description if description is not None else f"Proxy for: {underlying_description}"
+        self.description = (
+            description
+            if description is not None
+            else f"Proxy for: {underlying_description}"
+        )
 
         self.underlying = underlying
 
         # Store the provided hooks or default to no-op functions
-        self._before_hook_func = before_hook if before_hook is not None else _default_before_hook
-        self._around_hook_func = around_hook if around_hook is not None else _default_around_hook
-        self._after_hook_func = after_hook if after_hook is not None else _default_after_hook
+        self._before_hook_func = (
+            before_hook if before_hook is not None else _default_before_hook
+        )
+        self._around_hook_func = (
+            around_hook if around_hook is not None else _default_around_hook
+        )
+        self._after_hook_func = (
+            after_hook if after_hook is not None else _default_after_hook
+        )
 
         # Dynamically bind the 'forward' method after all necessary attributes are set
         self._bind_forward(self.inputs, self.output_type)
@@ -112,7 +134,6 @@ def forward(self, {arg_list}):
 
         # Define the actual underlying tool's execution as a callable for the 'around' hook
         def _proceed_with_underlying_tool(*_args, **_kwargs):
-
             return self.underlying.forward(*_args, **_kwargs)
 
         try:
@@ -120,7 +141,9 @@ def forward(self, {arg_list}):
             self._before_hook_func(self, *args, **kwargs)
 
             # 2. Execute the Around hook, passing the callable to proceed with the underlying tool
-            result = self._around_hook_func(self, _proceed_with_underlying_tool, *args, **kwargs)
+            result = self._around_hook_func(
+                self, _proceed_with_underlying_tool, *args, **kwargs
+            )
 
         except Exception as e:
             # Capture any exception that occurred during a hook or from the underlying tool
