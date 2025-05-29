@@ -76,3 +76,7 @@ og "write a python script that prints 'hello world'"
     # ... other settings ...
     ```
     Adjust model IDs and parameters for `default_agent`, `executor_agent`, `planner_agent`, and `auditor_agent` if you're using different LLMs or API endpoints.
+
+## License
+
+This project is licensed under the LGPLv3. (see the included [LICENSE](LICENSE) file)
