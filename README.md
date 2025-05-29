@@ -11,6 +11,7 @@ og "summarize this repo"
 og "generate a gitignore for Rust"
 og "list files modified in last commit"
 og "write a python script that prints 'hello world'"
+```
 
 ## ✨ Key Features
 

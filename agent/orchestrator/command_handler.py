@@ -124,7 +124,7 @@ class CommandHandler:
         emit(
             "info_log",
             {
-                "message": f"User denied execution of current action. Providing summary and ending session.",
+                "message": "User denied execution of current action. Providing summary and ending session.",
                 "location": "orchestrator/command_handler._handle_deny_current_action",
             },
         )
