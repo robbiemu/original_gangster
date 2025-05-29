@@ -196,7 +196,7 @@ class SummarizingCodeAgent(CodeAgent):
         base_code_agent_instance = super().from_dict(parent_kwargs_for_base_init)
 
         # 5. Instantiate this SummarizingCodeAgent using parameters from the base instance
-        # and the new summarizer-specific parameters.
+        # and the summarizer-specific parameters.
         # We need to explicitly pass all arguments expected by CodeAgent's __init__
         # and then add our own.
         return cls(

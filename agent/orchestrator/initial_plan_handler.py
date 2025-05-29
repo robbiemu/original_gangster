@@ -20,7 +20,6 @@ class InitialPlanHandler:
         """Create initial plan and perform safety audit."""
         try:
             plan_str = self._generate_plan(query)
-            # The parse_plan function will now handle the new format
             recipe_steps, fallback_action = self._parse_plan(plan_str) 
             self._validate_plan(recipe_steps, fallback_action, query)
             self._audit_initial_action(recipe_steps, fallback_action, query)
@@ -52,7 +51,7 @@ class InitialPlanHandler:
 
     def _get_first_action(self, recipe_steps: List[Dict], fallback_action: Optional[Dict]) -> Tuple[str, str]:
         """Get the first action that would be executed."""
-        # Since fallback_action will typically be None with the new prompt, this will prioritize recipe_steps.
+        # Since fallback_action will typically be None, this will prioritize recipe_steps.
         if recipe_steps:
             first_step = recipe_steps[0]
             return first_step.get('action', ''), first_step.get('description', 'First step of recipe')

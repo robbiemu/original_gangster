@@ -197,7 +197,6 @@ def check_acls_and_xattrs(path: str) -> str:
             current_attr = None
             for line in xattr_result.stdout.split('\n'):
                 if line and not line.startswith('\t') and ':' in line:
-                    # New attribute
                     attr_name = line.split(':')[0]
                     current_attr = attr_name
                     result["extended_attributes"][attr_name] = []

@@ -27,7 +27,6 @@ def factory_auditor_agent(model_id: str, model_params: Dict) -> ToolCallingAgent
 
     tools = get_auditor_tools() + get_common_tools()  
 
-    # auditor_agent uses count_files imported from the new module
     auditor_agent = ToolCallingAgent(model=auditor_model, tools=tools)
     return auditor_agent
 
@@ -37,11 +36,11 @@ def build_audit_query(request: str, context: str = "") -> str:
     
     template = _prompts_config["auditor_query_template"]
     
-    execution_context = run_show_context_script()
+    terminal_session_context = run_show_context_script()
     full_context_for_template = run_show_context_script()
     if context.strip():
         full_context_for_template += f"\n\nAdditional User Context:\n{context.strip()}"
-    return template.format(request=request, context=context, execution_context=execution_context).strip()
+    return template.format(request=request, context=context, terminal_session_context=terminal_session_context).strip()
 
 
 def _find_audit_verdict_in_json(data: Any) -> Optional[Dict[str, Any]]:
@@ -139,7 +138,7 @@ def parse_audit_markdown_response(auditor_output: Any) -> Dict[str, Any]:
     """
     print("[AGENT/DEBUG] trying to parse audit response (raw):", auditor_output, file=sys.stderr)
 
-    # First, try to parse as JSON using the new helper function
+    # First, try to parse as JSON
     json_verdict = _parse_json_verdict(auditor_output)
     if json_verdict:
         return json_verdict

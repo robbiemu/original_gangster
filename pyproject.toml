@@ -1,6 +1,6 @@
 [project]
 name = "original-gangster"
-version = "0.1.0"
+version = "0.1.1"
 description = "A command-line AI companion for terminal work, combining a Go CLI with a Python-based smolagent."
 authors = [
   { name = "robbiemu", email = "roberto.tomas.cuentas@gmail.com" }

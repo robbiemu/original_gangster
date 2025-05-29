@@ -1,8 +1,7 @@
-# agent/agents/executor/create_audited_sessioned_proxy.py
-
 import json
 import sys
 from pathlib import Path
+import re 
 from typing import Any, Callable
 from smolagents import ToolCallingAgent
 from smolagents.tools import Tool
@@ -19,7 +18,7 @@ def create_audited_sessioned_proxy(
     session: AgentSession,
     auditor: ToolCallingAgent,
     emit: _EmitterCallable,
-    output_threshold_bytes: int 
+    output_threshold_bytes: int
 ) -> ProxyTool:
     """
     Factory function to create a ProxyTool instance configured with agent
@@ -74,7 +73,7 @@ def create_audited_sessioned_proxy(
                 planned_action_content = expected_step.get('action', '').strip()
                 # Split planned action into subcommands by newline
                 planned_subcommands = planned_action_content.split('\n')
-                
+
                 # Compare the *current* action_str to the *expected subcommand*
                 expected_subcommand = session.get_expected_subcommand()
 
@@ -94,7 +93,7 @@ def create_audited_sessioned_proxy(
                         # 2. It's a single-step plan AND it's the very first action (already initially approved by Go).
                         if (session.recipe_preapproved and not session.deviation_occurred) or \
                            (session.is_single_step_plan and session.next_expected_recipe_step_idx == 0 and session.next_expected_subcommand_idx == 0):
-                            
+
                             emit("log", {"message": f"[AGENT] Auto-approving expected recipe step {session.next_expected_recipe_step_idx + 1}, subcommand {session.next_expected_subcommand_idx + 1}: '{action_str}' ({proxy_instance.name})"})
                             should_request_approval = False # Skip user approval
                         else:
@@ -159,24 +158,54 @@ def create_audited_sessioned_proxy(
         # 3. Execute Underlying Tool and Handle Outcome (only if approved or auto-approved)
         try:
             res = proceed_callable(*args, **kwargs)
-            
-            result_str = str(res) if res is not None else "completed"
-            
-            # Only apply this logic for tools that output strings (like shell_tool, file_content_tool)
-            # and if the output is not empty/trivial.
-            if isinstance(res, str) and res.strip():
+
+            interpret_message = f"Executed {proxy_instance.name}"
+            status = "success"
+
+            # Parse shell_tool's combined output format
+            if proxy_instance.name == "shell_tool" and isinstance(res, str):
+                stdout_match = re.search(r"--- STDOUT ---\n(.*?)(?=\n--- STDERR ---|\n--- Command exited|\Z)", res, re.DOTALL)
+                stderr_match = re.search(r"--- STDERR ---\n(.*?)(?=\n--- Command exited|\Z)", res, re.DOTALL)
+                exit_code_match = re.search(r"--- Command exited with status: (\d+) ---", res)
+
+                stdout_content = stdout_match.group(1).strip() if stdout_match else None
+                stderr_content = stderr_match.group(1).strip() if stderr_match else None
+                exit_code = int(exit_code_match.group(1)) if exit_code_match else 0
+
+                # Construct a more specific interpret_message for shell_tool
+                if stdout_content and stderr_content:
+                    interpret_message = f"Executed {proxy_instance.name} with stdout and stderr"
+                elif stdout_content:
+                    interpret_message = f"Executed {proxy_instance.name} with stdout"
+                elif stderr_content:
+                    interpret_message = f"Executed {proxy_instance.name} with stderr"
+                else: # No stdout/stderr sections found, but might have exit code or empty output
+                    interpret_message = f"Executed {proxy_instance.name}"
+
+
+                if exit_code != 0:
+                    status = "failure" # Indicate failure if exit code is non-zero
+                    interpret_message += f" (Exit code: {exit_code})"
+                    
+                if res.strip() == "[Command executed with no output]":
+                    interpret_message += " (no output)"
+                    status = "success" # It's a success if it ran but just produced nothing
+
+            # Ensure result_str always holds the content that will be emitted/saved.
+            # This is either the original `res` (for smaller outputs) or the temp file message.
+            result_str = str(res) if res is not None else "completed" # Default to 'completed' for non-string results
+
+            # Apply output thresholding logic only if `res` is a non-empty string.
+            if isinstance(res, str) and res.strip() and res.strip() != "[Command executed with no output]":
                 output_bytes = res.encode('utf-8')
-                # Use the passed output_threshold_bytes
                 if output_threshold_bytes > 0 and len(output_bytes) > output_threshold_bytes:
                     temp_dir_path = Path("/tmp") / "og" / session.session_hash
                     temp_dir_path.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-                    
-                    # Use a unique file name based on tool name and an index
-                    # session.executed_actions provides a good proxy for an incrementing index
-                    turn_index = len(session.executed_actions) # This is before adding current action
+
+                    turn_index = len(session.executed_actions) # Before adding current action
                     file_name = f"{turn_index+1}_{proxy_instance.name.replace(' ', '_')}.txt"
                     temp_file_path = temp_dir_path / file_name
-                    
+
                     try:
                         temp_file_path.write_bytes(output_bytes)
                         result_str = (
@@ -204,10 +233,11 @@ def create_audited_sessioned_proxy(
                         # All subcommands for this step are complete, move to next main step
                         session.increment_recipe_step() # This will reset subcommand_idx to 0
 
-            emit("result", {"status": "success", "interpret_message": f"Executed {proxy_instance.name}", "output": result_str})
-            return res # Return the original result, not the string, for potential chaining within agent (though unlikely for shell output)
+            emit("result", {"status": status, "interpret_message": interpret_message, "output": result_str})
+            return res # Return the original result from the underlying tool call.
+
         except Exception as e:
-            error_msg = f"Tool execution failed: {e}"
+            error_msg = f"Tool execution failed: {type(e).__name__}: {e}"
             emit("error", {"message": error_msg})
             session.add_executed_action(proxy_instance.name, action_str, f"ERROR: {error_msg}")
             emit("result", {"status": "failure", "interpret_message": error_msg, "output": ""})
@@ -223,7 +253,7 @@ def create_audited_sessioned_proxy(
     if not underlying_description:
         doc = getattr(tool, "__doc__", "")
         underlying_description = doc.strip().split("\n")[0] if doc else "an unspecified action"
-    
+
     proxy_description = f"Ask user approval for: {underlying_description}"
 
     # Instantiate ProxyTool, only providing the comprehensive_around_hook

@@ -26,7 +26,7 @@ class CommandHandler:
             "execute_single_action": self._handle_execute_single_action,
             "execute_fallback": self._handle_execute_fallback,
             "user_approval_response": self._handle_user_approval, # This should not cause an exit by itself
-            "deny_current_action": self._handle_deny_current_action, # NEW: for user denials from ProxyTool
+            "deny_current_action": self._handle_deny_current_action,
         }
         
         handler = handlers.get(cmd_type)
@@ -85,7 +85,7 @@ class CommandHandler:
         return True # Continue processing, as the ProxyTool will consume this.
 
     def _handle_deny_current_action(self, command: Dict) -> bool:
-        """NEW: Handle denial of an individual action during execution."""
+        """Handle denial of an individual action during execution."""
         emit("log", {"message": f"User denied execution of current action. Providing summary and ending session."})
         # The agent will now exit, so provide a summary of what happened so far.
         self._emit_final_summary_on_denial("User denied the proposed action.")

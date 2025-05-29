@@ -81,7 +81,7 @@ class AgentSession:
                         self.executed_actions = self._h5_load_json(grp, "executed") or []
                         self.original_query = self._h5_load_json(grp, "original_query")
 
-                        # Load new state variables
+                        # Load state variables
                         self.is_single_step_plan = grp.attrs.get("is_single_step_plan", False)
                         self.recipe_preapproved = grp.attrs.get("recipe_preapproved", False)
                         self.next_expected_recipe_step_idx = grp.attrs.get("next_expected_recipe_step_idx", 0)
@@ -104,7 +104,7 @@ class AgentSession:
             self.executed_actions = data.get("executed_actions", [])
             self.original_query = data.get("original_query")
 
-            # Load new state variables from JSON (if present, else defaults)
+            # Load state variables from JSON (if present, else defaults)
             self.is_single_step_plan = data.get("is_single_step_plan", False)
             self.recipe_preapproved = data.get("recipe_preapproved", False)
             self.next_expected_recipe_step_idx = data.get("next_expected_recipe_step_idx", 0)
@@ -124,7 +124,7 @@ class AgentSession:
             "fallback_action": self.fallback_action,
             "executed_actions": self.executed_actions,
             "original_query": self.original_query,
-            # Save new state variables to JSON
+            # Save state variables to JSON
             "is_single_step_plan": self.is_single_step_plan,
             "recipe_preapproved": self.recipe_preapproved,
             "next_expected_recipe_step_idx": self.next_expected_recipe_step_idx,
@@ -143,7 +143,7 @@ class AgentSession:
                 grp = h5f.require_group(self.session_hash)
                 grp.attrs["timestamp"] = time.time()
 
-                # Save new state variables as HDF5 attributes for quick access
+                # Save state variables as HDF5 attributes for quick access
                 grp.attrs["is_single_step_plan"] = self.is_single_step_plan
                 grp.attrs["recipe_preapproved"] = self.recipe_preapproved
                 grp.attrs["next_expected_recipe_step_idx"] = self.next_expected_recipe_step_idx
@@ -193,7 +193,7 @@ class AgentSession:
         self.original_query = query
         self._save_session()
 
-    # New setters for session state
+    # setters for session state
     def set_recipe_preapproved(self, status: bool):
         self.recipe_preapproved = status
         self._save_session()
@@ -245,7 +245,7 @@ class AgentSession:
 
         if self.executed_actions:
             # Only add "Actions completed so far:" if there are actions, after the original request
-            if self.original_query: # NEW: Add blank line for separation if original query was present
+            if self.original_query: 
                 context_parts.append("") 
                 
             context_parts.append("Actions completed so far:")

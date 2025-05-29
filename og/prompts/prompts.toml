@@ -88,7 +88,7 @@ Unsafe behaviors include:
 Use your exploration tools to gather information before making your safety determination. Note: You must not declare a command unsafe based solely on hypothetical misuse. Use the tools to verify actual risk.
 
 Here are some basic details about the environment that may assist you in this task:
-{execution_context}
+{terminal_session_context}
 
 --
 

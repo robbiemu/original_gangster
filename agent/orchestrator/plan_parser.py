@@ -5,16 +5,16 @@ from typing import Dict, List, Optional, Tuple
 
 def parse_plan(plan_str: str, verbose: bool = False) -> Tuple[List[Dict], Optional[Dict]]:
     """
-    Parse the plan string into recipe steps based on the new prompt format.
-    The new prompt expects a multi-line string of commands, potentially separated by '[STEP]' markers.
+    Parse the plan string into recipe steps based on the prompt format.
+    The prompt expects a multi-line string of commands, potentially separated by '[STEP]' markers.
     Each block of commands separated by [STEP] becomes a single recipe step.
     The fallback action is no longer explicitly defined by the model in this format, so it will be None.
     """
     if verbose:
-        print(f"[AGENT/DEBUG] Parsing plan with new format. Raw plan_str:\n---\n{plan_str}\n---", file=sys.stderr)
+        print(f"[AGENT/DEBUG] Parsing plan with format. Raw plan_str:\n---\n{plan_str}\n---", file=sys.stderr)
 
     recipe_steps: List[Dict] = []
-    fallback_action: Optional[Dict] = None # The new format doesn't explicitly define a fallback
+    fallback_action: Optional[Dict] = None # The format doesn't explicitly define a fallback
 
     # Normalize newlines and strip leading/trailing whitespace from the whole plan
     # This ensures consistency regardless of original line endings (e.g., \r\n vs \n)
