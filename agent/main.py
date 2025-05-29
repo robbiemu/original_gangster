@@ -14,11 +14,11 @@ from .session import check_session_exists_in_h5
 
 def run_orchestration(query: str, model_id: str, model_params: dict, auditor_model_id: str,
                      auditor_model_params: dict, verbose: bool, 
-                     session_hash: str, workdir: str) -> None:
+                     session_hash: str, workdir: str, output_threshold_bytes: int) -> None:
     """Main orchestration function."""
     orchestrator = AgentOrchestrator(
         model_id, model_params, auditor_model_id, auditor_model_params,
-        session_hash, workdir, verbose
+        session_hash, workdir, verbose, output_threshold_bytes
     )
     orchestrator.run(query)
 
@@ -47,7 +47,8 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging from agent")
     parser.add_argument("--summary-mode", action="store_true", help="Enable summary mode for final output")
     parser.add_argument("--session-hash", required=True, help="Unique hash for the current session")
-
+    parser.add_argument("--output-threshold-bytes", type=int, default=16768, help="Threshold for tool output size before saving to file")
+    
     args = parser.parse_args()
 
     # Validate session requirements
@@ -74,6 +75,7 @@ def main():
             verbose=args.verbose,
             session_hash=args.session_hash,
             workdir=args.workdir,
+            output_threshold_bytes=args.output_threshold_bytes,
         )
     except Exception as e:
         import traceback

@@ -35,14 +35,13 @@ def factory_auditor_agent(model_id: str, model_params: Dict) -> ToolCallingAgent
 def build_audit_query(request: str, context: str = "") -> str:
     """ Enhanced audit system with directory exploration capabilities """
     
-    # TODO - add tools and execution context
-    # execution_context = run_show_context_script()
-    
     template = _prompts_config["auditor_query_template"]
+    
+    execution_context = run_show_context_script()
     full_context_for_template = run_show_context_script()
     if context.strip():
         full_context_for_template += f"\n\nAdditional User Context:\n{context.strip()}"
-    return template.format(request=request, context=context).strip()
+    return template.format(request=request, context=context, execution_context=execution_context).strip()
 
 
 def _find_audit_verdict_in_json(data: Any) -> Optional[Dict[str, Any]]:
@@ -152,15 +151,15 @@ def parse_audit_markdown_response(auditor_output: Any) -> Dict[str, Any]:
     reason = "N/A"
     explanation = "N/A"
 
-    safe_match = re.search(r"^#\s*SAFE:\s*(true|false)", text, re.MULTILINE | re.IGNORECASE)
+    safe_match = re.search(r"^#+\s*SAFE:\s*(true|false)", text, re.MULTILINE | re.IGNORECASE)
     if safe_match:
         safe = safe_match.group(1).lower() == "true"
 
-    reason_match = re.search(r"^#\s*REASON:\s*(.*)", text, re.MULTILINE | re.IGNORECASE)
+    reason_match = re.search(r"^#+\s*REASON:\s*(.*)", text, re.MULTILINE | re.IGNORECASE)
     if reason_match:
         reason = reason_match.group(1).strip()
 
-    explanation_match = re.search(r"^#\s*EXPLANATION:\s*(.*)", text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+    explanation_match = re.search(r"^#+\s*EXPLANATION:\s*(.*)", text, re.MULTILINE | re.IGNORECASE | re.DOTALL)
     if explanation_match:
         explanation = explanation_match.group(1).strip()
     

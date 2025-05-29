@@ -17,7 +17,7 @@ class AgentOrchestrator:
     """Main orchestrator for the agent system."""
     
     def __init__(self, model_id: str, model_params: dict, auditor_model_id: str, 
-                 auditor_model_params: dict, session_hash: str, workdir: str, verbose: bool):
+            auditor_model_params: dict, session_hash: str, workdir: str, verbose: bool, output_threshold_bytes: int):
         self.verbose = verbose
         self.workdir = workdir
         
@@ -29,7 +29,7 @@ class AgentOrchestrator:
         # Initialize session and agents
         self.session = AgentSession(session_hash, emit)
         self.auditor_agent = factory_auditor_agent(auditor_model_id, auditor_model_params)
-        self.executor_agent = factory_executor_agent(model_id, model_params, self.session, self.auditor_agent)
+        self.executor_agent = factory_executor_agent(model_id, model_params, self.session, self.auditor_agent, output_threshold_bytes)
         self.planner_agent = factory_planner_agent(model_id, model_params)
         
         # Initialize handlers

@@ -8,7 +8,7 @@ from .create_audited_sessioned_proxy import create_audited_sessioned_proxy
 from .tools import shell_tool, file_content_tool
 
 
-def factory_executor_agent(model_id: str, model_params: Dict, session: AgentSession, auditor: ToolCallingAgent) -> CodeAgent:
+def factory_executor_agent(model_id: str, model_params: Dict, session: AgentSession, auditor: ToolCallingAgent, output_threshold_bytes: int) -> CodeAgent:
     main_model = LiteLLMModel(model_id=model_id, **model_params)
     tools = [
         create_audited_sessioned_proxy(
@@ -16,14 +16,16 @@ def factory_executor_agent(model_id: str, model_params: Dict, session: AgentSess
             tool=shell_tool, 
             session=session, 
             auditor=auditor, 
-            emit=emit
+            emit=emit,
+            output_threshold_bytes=output_threshold_bytes
         ),
         create_audited_sessioned_proxy(
             name="file_content_tool", 
             tool=file_content_tool, 
             session=session, 
             auditor=auditor, 
-            emit=emit
+            emit=emit,
+            output_threshold_bytes=output_threshold_bytes
         ),
     ]
     tools += get_common_tools()

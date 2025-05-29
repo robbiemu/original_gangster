@@ -1,5 +1,8 @@
+# agent/agents/executor/create_audited_sessioned_proxy.py
+
 import json
 import sys
+from pathlib import Path
 from typing import Any, Callable
 from smolagents import ToolCallingAgent
 from smolagents.tools import Tool
@@ -15,7 +18,8 @@ def create_audited_sessioned_proxy(
     tool: Tool,
     session: AgentSession,
     auditor: ToolCallingAgent,
-    emit: _EmitterCallable
+    emit: _EmitterCallable,
+    output_threshold_bytes: int 
 ) -> ProxyTool:
     """
     Factory function to create a ProxyTool instance configured with agent
@@ -155,7 +159,35 @@ def create_audited_sessioned_proxy(
         # 3. Execute Underlying Tool and Handle Outcome (only if approved or auto-approved)
         try:
             res = proceed_callable(*args, **kwargs)
+            
             result_str = str(res) if res is not None else "completed"
+            
+            # Only apply this logic for tools that output strings (like shell_tool, file_content_tool)
+            # and if the output is not empty/trivial.
+            if isinstance(res, str) and res.strip():
+                output_bytes = res.encode('utf-8')
+                # Use the passed output_threshold_bytes
+                if output_threshold_bytes > 0 and len(output_bytes) > output_threshold_bytes:
+                    temp_dir_path = Path("/tmp") / "og" / session.session_hash
+                    temp_dir_path.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+                    
+                    # Use a unique file name based on tool name and an index
+                    # session.executed_actions provides a good proxy for an incrementing index
+                    turn_index = len(session.executed_actions) # This is before adding current action
+                    file_name = f"{turn_index+1}_{proxy_instance.name.replace(' ', '_')}.txt"
+                    temp_file_path = temp_dir_path / file_name
+                    
+                    try:
+                        temp_file_path.write_bytes(output_bytes)
+                        result_str = (
+                            f"-- out saved to {temp_file_path} because at "
+                            f"{(len(output_bytes) / 1024):.2f} KB, it is too long to include. "
+                            f"Use tools (for example perhaps `grep` or `cat {temp_file_path}`) to find the details that you require --"
+                        )
+                        emit("log", {"message": f"Tool output saved to temporary file: {temp_file_path}"})
+                    except Exception as file_e:
+                        emit("error", {"message": f"Failed to save large tool output to {temp_file_path}: {file_e}. Returning full output."})
+                        result_str = str(res) # Fallback to returning full output if file write fails
 
             # Add to executed actions history (this also adds to next_expected_recipe_step_idx if pre-approved)
             session.add_executed_action(proxy_instance.name, action_str, result_str)
@@ -173,7 +205,7 @@ def create_audited_sessioned_proxy(
                         session.increment_recipe_step() # This will reset subcommand_idx to 0
 
             emit("result", {"status": "success", "interpret_message": f"Executed {proxy_instance.name}", "output": result_str})
-            return res
+            return res # Return the original result, not the string, for potential chaining within agent (though unlikely for shell output)
         except Exception as e:
             error_msg = f"Tool execution failed: {e}"
             emit("error", {"message": error_msg})
